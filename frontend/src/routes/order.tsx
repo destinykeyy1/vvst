@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, Download, FileText } from "lucide-react";
-import { Button, Field, Input, PageHeader, Panel } from "@/components/ui-kit";
+import { Button, Field, Input, Modal, PageHeader, Panel } from "@/components/ui-kit";
 import { PasswordGate } from "@/components/PasswordGate";
 import { apiGetCollection, apiPutCollection } from "@/lib/api";
 import { useState } from "react";
