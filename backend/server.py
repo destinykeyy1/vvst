@@ -595,7 +595,9 @@ class PlannerStore:
         self.connect_kwargs.setdefault('connect_timeout', 10)
         with self.connect() as db:
             db.execute('\n                CREATE TABLE IF NOT EXISTS planner_items (\n                    collection TEXT NOT NULL,\n                    item_id BIGINT NOT NULL,\n                    payload JSONB NOT NULL,\n                    PRIMARY KEY (collection, item_id)\n                )\n            ')
-            db.execute("\n                CREATE TABLE IF NOT EXISTS planner_access_credentials (\n                    scope TEXT PRIMARY KEY CHECK (scope IN ('orders', 'passport')),\n                    password_salt BYTEA NOT NULL,\n                    password_hash BYTEA NOT NULL,\n                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n                )\n            ")
+            db.execute("\n                CREATE TABLE IF NOT EXISTS planner_access_credentials (\n                    scope TEXT PRIMARY KEY CHECK (scope IN ('orders', 'passport', 'general')),\n                    password_salt BYTEA NOT NULL,\n                    password_hash BYTEA NOT NULL,\n                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n                )\n            ")
+            db.execute("\n                ALTER TABLE planner_access_credentials\n                DROP CONSTRAINT IF EXISTS planner_access_credentials_scope_check\n            ")
+            db.execute("\n                ALTER TABLE planner_access_credentials\n                ADD CONSTRAINT planner_access_credentials_scope_check\n                CHECK (scope IN ('orders', 'passport', 'general'))\n            ")
             db.execute('\n                CREATE TABLE IF NOT EXISTS planner_access_sessions (\n                    token_hash TEXT PRIMARY KEY,\n                    scope TEXT NOT NULL REFERENCES planner_access_credentials(scope)\n                        ON DELETE CASCADE,\n                    expires_at TIMESTAMPTZ NOT NULL\n                )\n            ')
             db.execute('\n                CREATE INDEX IF NOT EXISTS planner_access_sessions_scope_expiry\n                ON planner_access_sessions (scope, expires_at)\n            ')
 
@@ -813,7 +815,7 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
             # Allow Docker host access and port mapping
             allowed_hosts = {'localhost', '127.0.0.1', '0.0.0.0'}
             if os.environ.get('MILITARY_PLANNER_HOST') == '0.0.0.0':
-                allowed_hosts.add('host.docker.internal')
+                allowed_hosts.update({'host.docker.internal', 'backend', 'web'})
             # Allow any port when running in Docker (external port may differ)
             if os.environ.get('MILITARY_PLANNER_HOST') == '0.0.0.0':
                 port_check = True

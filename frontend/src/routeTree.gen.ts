@@ -20,10 +20,11 @@ import { Route as OrderRouteImport } from './routes/order'
 import { Route as OupRouteImport } from './routes/oup'
 import { Route as UnavailableRouteImport } from './routes/unavailable'
 import { Route as VvstRouteImport } from './routes/vvst'
-import { Route as WriteoffAkbRouteImport } from './routes/writeoff/akb'
-import { Route as WriteoffHeadsetsRouteImport } from './routes/writeoff/headsets'
-import { Route as WriteoffTarpsRouteImport } from './routes/writeoff/tarps'
-import { Route as WriteoffTiresRouteImport } from './routes/writeoff/tires'
+import { Route as CardVehicleIdRouteImport } from './routes/card.$vehicleId'
+import { Route as WriteoffAkbRouteImport } from './routes/writeoff.akb'
+import { Route as WriteoffHeadsetsRouteImport } from './routes/writeoff.headsets'
+import { Route as WriteoffTarpsRouteImport } from './routes/writeoff.tarps'
+import { Route as WriteoffTiresRouteImport } from './routes/writeoff.tires'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -80,6 +81,11 @@ const VvstRoute = VvstRouteImport.update({
   path: '/vvst',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CardVehicleIdRoute = CardVehicleIdRouteImport.update({
+  id: '/$vehicleId',
+  path: '/$vehicleId',
+  getParentRoute: () => CardRoute,
+} as any)
 const WriteoffAkbRoute = WriteoffAkbRouteImport.update({
   id: '/writeoff/akb',
   path: '/writeoff/akb',
@@ -103,7 +109,7 @@ const WriteoffTiresRoute = WriteoffTiresRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/card': typeof CardRoute
+  '/card': typeof CardRouteWithChildren
   '/duty': typeof DutyRoute
   '/events': typeof EventsRoute
   '/history': typeof HistoryRoute
@@ -113,6 +119,7 @@ export interface FileRoutesByFullPath {
   '/oup': typeof OupRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
+  '/card/$vehicleId': typeof CardVehicleIdRoute
   '/writeoff/akb': typeof WriteoffAkbRoute
   '/writeoff/headsets': typeof WriteoffHeadsetsRoute
   '/writeoff/tarps': typeof WriteoffTarpsRoute
@@ -120,7 +127,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/card': typeof CardRoute
+  '/card': typeof CardRouteWithChildren
   '/duty': typeof DutyRoute
   '/events': typeof EventsRoute
   '/history': typeof HistoryRoute
@@ -130,6 +137,7 @@ export interface FileRoutesByTo {
   '/oup': typeof OupRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
+  '/card/$vehicleId': typeof CardVehicleIdRoute
   '/writeoff/akb': typeof WriteoffAkbRoute
   '/writeoff/headsets': typeof WriteoffHeadsetsRoute
   '/writeoff/tarps': typeof WriteoffTarpsRoute
@@ -138,7 +146,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/card': typeof CardRoute
+  '/card': typeof CardRouteWithChildren
   '/duty': typeof DutyRoute
   '/events': typeof EventsRoute
   '/history': typeof HistoryRoute
@@ -148,6 +156,7 @@ export interface FileRoutesById {
   '/oup': typeof OupRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
+  '/card/$vehicleId': typeof CardVehicleIdRoute
   '/writeoff/akb': typeof WriteoffAkbRoute
   '/writeoff/headsets': typeof WriteoffHeadsetsRoute
   '/writeoff/tarps': typeof WriteoffTarpsRoute
@@ -167,6 +176,7 @@ export interface FileRouteTypes {
     | '/oup'
     | '/unavailable'
     | '/vvst'
+    | '/card/$vehicleId'
     | '/writeoff/akb'
     | '/writeoff/headsets'
     | '/writeoff/tarps'
@@ -184,6 +194,7 @@ export interface FileRouteTypes {
     | '/oup'
     | '/unavailable'
     | '/vvst'
+    | '/card/$vehicleId'
     | '/writeoff/akb'
     | '/writeoff/headsets'
     | '/writeoff/tarps'
@@ -201,6 +212,7 @@ export interface FileRouteTypes {
     | '/oup'
     | '/unavailable'
     | '/vvst'
+    | '/card/$vehicleId'
     | '/writeoff/akb'
     | '/writeoff/headsets'
     | '/writeoff/tarps'
@@ -209,7 +221,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  CardRoute: typeof CardRoute
+  CardRoute: typeof CardRouteWithChildren
   DutyRoute: typeof DutyRoute
   EventsRoute: typeof EventsRoute
   HistoryRoute: typeof HistoryRoute
@@ -304,6 +316,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof VvstRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/card/$vehicleId': {
+      id: '/card/$vehicleId'
+      path: '/$vehicleId'
+      fullPath: '/card/$vehicleId'
+      preLoaderRoute: typeof CardVehicleIdRouteImport
+      parentRoute: typeof CardRoute
+    }
     '/writeoff/akb': {
       id: '/writeoff/akb'
       path: '/writeoff/akb'
@@ -335,9 +354,19 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface CardRouteChildren {
+  CardVehicleIdRoute: typeof CardVehicleIdRoute
+}
+
+const CardRouteChildren: CardRouteChildren = {
+  CardVehicleIdRoute: CardVehicleIdRoute,
+}
+
+const CardRouteWithChildren = CardRoute._addFileChildren(CardRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  CardRoute: CardRoute,
+  CardRoute: CardRouteWithChildren,
   DutyRoute: DutyRoute,
   EventsRoute: EventsRoute,
   HistoryRoute: HistoryRoute,

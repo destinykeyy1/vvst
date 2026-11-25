@@ -1,12 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { WriteOffPage } from "@/components/pages/WriteOffPage";
-import { pageHead } from "@/lib/head";
+import { PasswordGate } from "@/components/PasswordGate";
 
 export const Route = createFileRoute("/writeoff/tires")({
-  head: () => pageHead("Списание шин", "Учёт списания автомобильных шин."),
   component: Page,
 });
 
 function Page() {
-  return <WriteOffPage kind="tires" title="Списание шин" itemLabel="Модель / размер шины" />;
+  return (
+    <PasswordGate section="writeoff/tires" title="Списание шин">
+      <WriteOffPage kind="tires" title="Списание шин" itemLabel="Модель / размер шины" />
+    </PasswordGate>
+  );
 }

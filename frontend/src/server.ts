@@ -7,6 +7,35 @@ type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
 };
 
+const API_ORIGIN = (process.env.API_ORIGIN ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+
+async function proxyApi(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const target = `${API_ORIGIN}${url.pathname}${url.search}`;
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+  headers.delete("content-length");
+  headers.delete("expect");
+  headers.delete("connection");
+  const init: RequestInit = {
+    method: request.method,
+    headers,
+    redirect: "manual",
+  };
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    init.body = await request.arrayBuffer();
+  }
+  const upstream = await fetch(target, init);
+  const responseHeaders = new Headers(upstream.headers);
+  responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-length");
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: responseHeaders,
+  });
+}
+
 let serverEntryPromise: Promise<ServerEntry> | undefined;
 
 async function getServerEntry(): Promise<ServerEntry> {
@@ -50,6 +79,10 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
+      const url = new URL(request.url);
+      if (url.pathname.startsWith("/api")) {
+        return await proxyApi(request);
+      }
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);

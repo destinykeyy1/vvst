@@ -1,0 +1,18 @@
+# Production image: builds the TanStack Start app and serves it with the
+# bundled Nitro node-server. /api requests are proxied to API_ORIGIN.
+FROM oven/bun:1 AS build
+WORKDIR /app
+COPY package.json bun.lock bunfig.toml ./
+RUN bun install
+COPY . .
+RUN bun run build
+
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production \
+    NITRO_PORT=8080 \
+    NITRO_HOST=0.0.0.0 \
+    API_ORIGIN=http://backend:8000
+COPY --from=build /app/.output ./.output
+EXPOSE 8080
+CMD ["node", ".output/server/index.mjs"]
