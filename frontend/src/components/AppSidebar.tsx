@@ -9,7 +9,7 @@ export const NAV = [
   { to: "/oup", label: "Расписание ОУП", locked: true },
   { to: "/household", label: "Хозяйственная деятельность", locked: true },
   { to: "/events", label: "Расписание иных мероприятий", locked: true },
-  { to: "/history", label: "История эксплуатации", locked: true },
+  { to: "/history", label: "История эксплуатации" },
   { to: "/journal", label: "Журнал" },
   { to: "/duty", label: "Дежурный по парку" },
   { to: "/order", label: "Наряд", locked: true },

@@ -409,21 +409,24 @@ class JournalEntryDTO:
     dutySignature: 'str'
     departureEngineHours: 'float | None' = None
     arrivalEngineHours: 'float | None' = None
+    speedometer: 'str | None' = None
     @classmethod
     def parse(cls, raw: 'Any') -> 'dict[str, Any]':
         fields = set(cls.__dataclass_fields__)
-        engine_hour_fields = {'departureEngineHours', 'arrivalEngineHours'}
-        _exact_fields(raw, fields - engine_hour_fields, engine_hour_fields)
+        optional_fields = {'departureEngineHours', 'arrivalEngineHours', 'speedometer'}
+        _exact_fields(raw, fields - optional_fields, optional_fields)
+        if raw.get('speedometer') is not None:
+            _string(raw['speedometer'], 'speedometer')
         if type(raw['id']) is not int or raw['id'] < 1:
             raise ValidationError('Идентификатор записи журнала должен быть положительным целым числом')
         for field in ('date', 'arrivalDate'):
             _iso_date(raw[field], field)
-        for field in fields - {'id', 'date', 'arrivalDate', 'returnDeadline', 'arrivalOdometer', 'departureOdometer', 'arrivalEngineHours', 'departureEngineHours'}:
+        for field in fields - {'id', 'date', 'arrivalDate', 'returnDeadline', 'arrivalOdometer', 'departureOdometer', 'arrivalEngineHours', 'departureEngineHours', 'speedometer'}:
             _string(raw[field], field)
         for field in ('departureOdometer', 'arrivalOdometer'):
             if raw[field] is not None:
                 _nonnegative_int(raw[field], field)
-        for field in engine_hour_fields:
+        for field in optional_fields - {'speedometer'}:
             if raw.get(field) is not None:
                 _nonnegative_number(raw[field], field)
         _choice(raw['returnDeadline'], {'15:00', '18:00'}, 'returnDeadline')
@@ -944,11 +947,11 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                     self.send_json(503, {'status': 'unavailable', 'error': 'database unavailable'})
                 self.send_json(200, {'status': 'ok'})
                 return
-            # Check authentication for protected endpoints
+            # Check authentication for protected endpoints (write-only for vehicles, full for others)
             protected_paths = {
-                '/api/vehicles', '/api/unavailable', '/api/order-drafts', '/api/orders',
+                '/api/unavailable', '/api/order-drafts', '/api/orders',
                 '/api/order-section-lines', '/api/schedules', '/api/household-schedules',
-                '/api/other-schedules', '/api/exploitation', '/api/vehicle-details',
+                '/api/other-schedules', '/api/exploitation',
                 '/api/standing-vehicles'
             }
             if path in protected_paths:
@@ -1022,11 +1025,11 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
 
         def do_PUT(self) -> 'None':
             path = urlparse(self.path).path
-            # Check authentication for protected endpoints
+            # Check authentication for protected endpoints (write-only for vehicles, full for others)
             protected_paths = {
-                '/api/vehicles', '/api/unavailable', '/api/order-drafts', '/api/orders',
+                '/api/unavailable', '/api/order-drafts', '/api/orders',
                 '/api/order-section-lines', '/api/schedules', '/api/household-schedules',
-                '/api/other-schedules', '/api/exploitation', '/api/vehicle-details',
+                '/api/other-schedules', '/api/exploitation',
                 '/api/standing-vehicles', '/api/mileage-sync'
             }
             if path in protected_paths:
@@ -1069,11 +1072,6 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
 
         def do_PATCH(self) -> 'None':
             path = urlparse(self.path).path
-            # Check authentication for protected endpoints
-            if path.startswith('/api/vehicles/'):
-                if not self.check_authentication():
-                    self.send_json(401, {'error': 'Authentication required'})
-                    return
             prefix = '/api/vehicles/'
             vehicle_id_text = path[len(prefix):] if path.startswith(prefix) else ''
             if not vehicle_id_text.isdecimal():
@@ -1103,11 +1101,6 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
 
         def do_DELETE(self) -> 'None':
             path = urlparse(self.path).path
-            # Check authentication for protected endpoints
-            if path == '/api/vehicles':
-                if not self.check_authentication():
-                    self.send_json(401, {'error': 'Authentication required'})
-                    return
             if path == '/api/vehicles':
                 try:
                     body = self.read_body()

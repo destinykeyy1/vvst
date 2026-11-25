@@ -46,6 +46,8 @@ function OrderPage() {
   const [activeTab, setActiveTab] = useState<OrderTab>("duty");
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Set<number> | null>(null);
 
   const queryClient = useQueryClient();
 
@@ -91,10 +93,17 @@ function OrderPage() {
 
   const handleDeleteSelected = () => {
     if (selectedRows.size === 0) return;
-    if (!window.confirm(`Удалить выбранные строки (${selectedRows.size})?`)) return;
-    const updated = lines.filter((line) => !selectedRows.has(line.id));
+    setDeleteTarget(selectedRows);
+    setDeleteOpen(true);
+  };
+
+  const performDelete = () => {
+    if (!deleteTarget) return;
+    const updated = lines.filter((line) => !deleteTarget.has(line.id));
     saveMutation.mutate(updated);
     setSelectedRows(new Set());
+    setDeleteOpen(false);
+    setDeleteTarget(null);
   };
 
   const handleCellEdit = (id: number, field: keyof OrderLine, value: string) => {
@@ -326,6 +335,27 @@ function OrderPage() {
           Сохранить изменения
         </Button>
       </Panel>
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Подтверждение удаления"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Отмена
+            </Button>
+            <Button variant="danger" onClick={performDelete}>
+              Удалить
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm">
+          Вы уверены, что хотите удалить выбранные строки ({deleteTarget?.size ?? 0})? Это действие нельзя отменить.
+        </p>
+      </Modal>
     </div>
   );
 }

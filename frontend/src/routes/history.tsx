@@ -2,7 +2,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Plus, Edit, Trash2 } from "lucide-react";
 import { Button, Field, Input, Modal, PageHeader, Panel } from "@/components/ui-kit";
-import { PasswordGate } from "@/components/PasswordGate";
 import { apiGetCollection, apiPutCollection } from "@/lib/api";
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -16,11 +15,7 @@ interface HistoryItem {
 }
 
 export const Route = createFileRoute("/history")({
-  component: () => (
-    <PasswordGate section="history" title="История эксплуатации">
-      <HistoryPage />
-    </PasswordGate>
-  ),
+  component: HistoryPage,
 });
 
 function HistoryPage() {
@@ -28,15 +23,17 @@ function HistoryPage() {
   const [editingItem, setEditingItem] = useState<HistoryItem | null>(null);
   const [formData, setFormData] = useState<Partial<HistoryItem>>({});
   const [selectedVehicleId, setSelectedVehicleId] = useState<number | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: number; vehicleId: number } | null>(null);
 
   const queryClient = useQueryClient();
 
-  const { data: history = [], isLoading } = useQuery({
+  const { data: history = [] } = useQuery({
     queryKey: ["vehicle-details"],
     queryFn: () => apiGetCollection<any>("vehicle-details"),
   });
 
-  const allHistory = history.flatMap((v: any) =>
+  const allHistory = (history || []).flatMap((v: any) =>
     (v.history || []).map((h: HistoryItem) => ({ ...h, vehicleId: v.vehicleId }))
   );
 
@@ -72,17 +69,22 @@ function HistoryPage() {
   };
 
   const handleDelete = (id: number, vehicleId: number) => {
-    if (!window.confirm("Удалить запись?")) return;
+    setDeleteTarget({ id, vehicleId });
+    setDeleteOpen(true);
+  };
 
+  const performDelete = () => {
+    if (!deleteTarget) return;
     const updatedVehicles = history.map((v: any) => {
-      if (v.vehicleId !== vehicleId) return v;
+      if (v.vehicleId !== deleteTarget.vehicleId) return v;
       return {
         ...v,
-        history: (v.history || []).filter((h: HistoryItem) => h.id !== id),
+        history: (v.history || []).filter((h: HistoryItem) => h.id !== deleteTarget.id),
       };
     });
-
     saveMutation.mutate(updatedVehicles);
+    setDeleteOpen(false);
+    setDeleteTarget(null);
   };
 
   const handleSave = () => {
@@ -225,6 +227,25 @@ function HistoryPage() {
             />
           </Field>
         </div>
+      </Modal>
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Подтверждение удаления"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Отмена
+            </Button>
+            <Button variant="danger" onClick={performDelete}>
+              Удалить
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm">Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
       </Modal>
     </div>
   );

@@ -60,22 +60,35 @@ export interface Trip {
   note: string;
 }
 
-export interface JournalRow {
-  id: string;
+// Matches backend JournalEntryDTO (journal entries with departure/arrival blocks).
+export interface JournalEntry {
+  id: number;
   date: string;
-  unit: string;
+  subdivision: string;
   driver: string;
-  waybill: string;
+  waybillNumber: string;
   brand: string;
-  plate: string;
-  techState: string;
-  speedometer: string;
-  odometerOut: string;
-  departTime: string;
-  odometerIn: string;
-  returnTime: string;
-  dutyOfficer: string;
+  regNumber: string;
+  departureCondition: string;
+  departureSeal: string;
+  departureOdometer: number | null;
+  departureTime: string;
+  purpose: string;
+  authority: string;
+  returnDeadline: string;
+  arrivalDate: string;
+  arrivalTime: string;
+  arrivalCondition: string;
+  arrivalSeal: string;
+  arrivalOdometer: number | null;
+  remarks: string;
+  dutySignature: string;
+  departureEngineHours?: number | null;
+  arrivalEngineHours?: number | null;
+  speedometer?: string | null;
 }
+
+export type JournalRow = JournalEntry;
 
 export type ScheduleKind = "oup" | "household" | "other";
 

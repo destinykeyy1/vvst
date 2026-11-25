@@ -22,6 +22,8 @@ function DutyPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<JournalDuty | null>(null);
   const [formData, setFormData] = useState<Partial<JournalDuty>>({});
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
   const queryClient = useQueryClient();
 
@@ -90,9 +92,16 @@ function DutyPage() {
   };
 
   const handleDelete = (id: number) => {
-    if (!window.confirm("Удалить запись?")) return;
-    const updated = duties.filter((d) => d.id !== id);
+    setDeleteTarget(id);
+    setDeleteOpen(true);
+  };
+
+  const performDelete = () => {
+    if (deleteTarget === null) return;
+    const updated = duties.filter((d) => d.id !== deleteTarget);
     saveMutation.mutate(updated);
+    setDeleteOpen(false);
+    setDeleteTarget(null);
   };
 
   const handleSave = () => {
@@ -220,6 +229,25 @@ function DutyPage() {
             />
           </Field>
         </div>
+      </Modal>
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Подтверждение удаления"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Отмена
+            </Button>
+            <Button variant="danger" onClick={performDelete}>
+              Удалить
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm">Вы уверены, что хотите удалить это дежурство? Это действие нельзя отменить.</p>
       </Modal>
     </div>
   );

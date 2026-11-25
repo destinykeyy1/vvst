@@ -36,7 +36,10 @@ export function vehicleToDto(vehicle: Vehicle, yearlyNorm: number): VehicleDto {
   for (const [key, value] of Object.entries(meta)) {
     passportData.push({ value, column: column++, header: META_PREFIX + key });
   }
-  passportData.push(...foreign);
+  // Preserve original passportExtra columns
+  for (const item of foreign) {
+    passportData.push({ value: item.value, column: item.column, header: item.header });
+  }
 
   const raw = vehicle.rawDto;
   return {

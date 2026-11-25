@@ -1,11 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ArrowUpDown } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { PasswordGate } from "@/components/PasswordGate";
 import { Button, Field, Input, Modal, PageHeader, Panel, Select } from "@/components/ui-kit";
 import { TYPE_LABELS, VehicleFormModal } from "@/components/VehicleForm";
-import { exportRowsToExcel, pickString, readExcelRows } from "@/lib/excel";
+import { exportRowsToExcel } from "@/lib/excel";
+import {
+  PASSPORT_COLUMN_COUNT,
+  PASSPORT_HEADERS,
+  exportPassportExcel,
+  importPassportExcel,
+  vehicleToPassportRow,
+} from "@/lib/passportExcel";
 import { formatNumber } from "@/lib/logic";
 import { getState, nextVehicleId, setState, updateVehicles, useAppState } from "@/lib/store";
 import type { Vehicle, VehicleType, WriteOffKind } from "@/lib/types";
@@ -34,23 +40,37 @@ type EditableKey = "unit" | "brand" | "year" | "commissionDate" | "order" | "pla
 interface Column {
   key: EditableKey;
   label: string;
-  width: number;
   numeric?: boolean;
-  align?: "center";
 }
 
 const COLUMNS: Column[] = [
-  { key: "unit", label: "Подразделение", width: 160 },
-  { key: "brand", label: "Марка машины", width: 160 },
-  { key: "year", label: "Год выпуска", width: 95, numeric: true },
-  { key: "commissionDate", label: "Дата ввода в эксплуатацию", width: 190 },
-  { key: "order", label: "Наряд на получение (передачу) ВВСТ", width: 240, align: "center" },
-  { key: "plate", label: "Государственный регистрационный знак (строевой номер)", width: 240, align: "center" },
-  { key: "group", label: "Группа эксплуатации", width: 160, align: "center" },
-  { key: "assignedTo", label: "Закреплённый водитель", width: 200 },
-  { key: "mileage", label: "Пробег, км", width: 120, numeric: true },
-  { key: "motoHours", label: "Моточасы", width: 110, numeric: true },
+  { key: "unit", label: "Подразделение" },
+  { key: "brand", label: "Марка машины" },
+  { key: "year", label: "Год выпуска", numeric: true },
+  { key: "commissionDate", label: "Дата ввода в эксплуатацию" },
+  { key: "order", label: "Наряд на получение (передачу) ВВСТ" },
+  { key: "plate", label: "Государственный регистрационный знак (строевой номер)" },
+  { key: "group", label: "Группа эксплуатации" },
+  { key: "assignedTo", label: "Закреплённый водитель" },
+  { key: "mileage", label: "Пробег, км", numeric: true },
+  { key: "motoHours", label: "Моточасы", numeric: true },
 ];
+
+// Passport column index (0-based) -> editable Vehicle field.
+const EDITABLE_BY_COL: Record<number, EditableKey> = {
+  1: "unit",
+  2: "brand",
+  3: "year",
+  4: "commissionDate",
+  5: "order",
+  6: "plate",
+  7: "group",
+  8: "assignedTo",
+  95: "mileage",
+  102: "motoHours",
+};
+
+const NUMERIC_COLS = new Set([3, 95, 102]);
 
 interface Edit {
   id: number;
@@ -75,18 +95,19 @@ function VvstPage() {
   const [query, setQuery] = useState("");
   const [type, setType] = useState<"all" | VehicleType>("all");
   const [woFilter, setWoFilter] = useState<string | null>(null);
-  const [hidden, setHidden] = useState<Set<EditableKey>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [sort, setSort] = useState<{ key: EditableKey | "n"; dir: 1 | -1 }>({ key: "n", dir: 1 });
   const [edits, setEdits] = useState<Edit[]>([]);
   const [redo, setRedo] = useState<Edit[]>([]);
   const [editing, setEditing] = useState<{ id: number; key: EditableKey } | null>(null);
 
   const [addOpen, setAddOpen] = useState(false);
-  const [colsOpen, setColsOpen] = useState(false);
   const [toOpen, setToOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importUpdate, setImportUpdate] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Set<number> | null>(null);
 
   const withEdits = useMemo(() => {
     const map = new Map<number, Vehicle>();
@@ -109,17 +130,10 @@ function VvstPage() {
         )
       : null;
     const list = withEdits
-      .map((v, i) => ({ v, n: i + 1 }))
-      .filter(({ v }) => (type === "all" || v.type === type) && (!q || v.brand.toLowerCase().includes(q) || v.plate.toLowerCase().includes(q)))
-      .filter(({ v }) => !woIds || woIds.has(v.id));
-    if (sort.key !== "n") {
-      const k = sort.key;
-      list.sort((a, b) => (String(a.v[k]) > String(b.v[k]) ? 1 : String(a.v[k]) < String(b.v[k]) ? -1 : 0) * sort.dir);
-    } else if (sort.dir === -1) list.reverse();
-    return list;
-  }, [withEdits, query, type, woFilter, writeOffs, sort]);
-
-  const visibleCols = COLUMNS.filter((c) => !hidden.has(c.key));
+      .filter((v) => (type === "all" || v.type === type) && (!q || v.brand.toLowerCase().includes(q) || v.plate.toLowerCase().includes(q)))
+      .filter((v) => !woIds || woIds.has(v.id));
+    return list.map((v, i) => ({ v, cells: vehicleToPassportRow(v, toInterval, i) }));
+  }, [withEdits, query, type, woFilter, writeOffs, toInterval]);
 
   const pushEdit = (e: Edit) => {
     setEdits((prev) => [...prev, e]);
@@ -134,35 +148,52 @@ function VvstPage() {
     setRedo([]);
   };
 
-  const toggleSort = (key: EditableKey | "n") =>
-    setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
-
   const allSelected = rows.length > 0 && rows.every(({ v }) => selected.has(v.id));
 
-  const importExcel = async (file: File) => {
-    const data = await readExcelRows(file);
-    let nextId = nextVehicleId();
-    const added: Vehicle[] = data
-      .map((r) => ({
-        id: nextId++,
-        unit: pickString(r, "Подразделение") || "1 АО (учебное) отдела (УБМ)",
-        brand: pickString(r, "Марка машины", "Марка"),
-        year: Number(pickString(r, "Год выпуска", "Год")) || new Date().getFullYear(),
-        commissionDate: pickString(r, "Дата ввода в эксплуатацию"),
-        order: pickString(r, "Наряд", "Наряд на получение (передачу) ВВСТ"),
-        plate: pickString(r, "Государственный регистрационный знак", "Гос. номер", "Номер"),
-        group: pickString(r, "Группа эксплуатации", "Группа") || "УЧ",
-        assignedTo: pickString(r, "Закреплённый водитель", "Водитель"),
-        type: "auto" as VehicleType,
-        status: "ready" as const,
-        statusReason: "",
-        mileage: Number(pickString(r, "Пробег", "Пробег, км")) || 0,
-        motoHours: Number(pickString(r, "Моточасы")) || 0,
-        details: {},
-      }))
-      .filter((v) => v.brand && v.plate);
-    updateVehicles((list) => [...list, ...added]);
-    toast.success(added.length ? `Импортировано машин: ${added.length}` : "В файле не найдено машин (нужны столбцы «Марка машины» и «Государственный регистрационный знак»)");
+  const importExcel = async () => {
+    if (!importFile) {
+      toast.error("Выберите файл");
+      return;
+    }
+    try {
+      const baseId = nextVehicleId();
+      const added = await importPassportExcel(importFile, baseId);
+      if (!added.length) {
+        toast.error("В файле не найдено машин (нужны столбцы «Подразделение» и «Марка машины»)");
+        return;
+      }
+      if (importUpdate) {
+        updateVehicles((list) => {
+          const existingMap = new Map(list.map((v) => [v.plate, v]));
+          const final = [...list];
+          for (const v of added) {
+            const existing = existingMap.get(v.plate);
+            if (existing) {
+              final[final.indexOf(existing)] = { ...existing, ...v, id: existing.id };
+            } else {
+              final.push(v);
+            }
+          }
+          return final;
+        });
+        toast.success(`Обновлено машин: ${added.length}`);
+      } else {
+        updateVehicles((list) => [...list, ...added]);
+        toast.success(`Импортировано машин: ${added.length}`);
+      }
+      setImportOpen(false);
+      setImportFile(null);
+    } catch {
+      toast.error("Не удалось прочитать файл Excel");
+    }
+  };
+
+  const exportVvst = () => {
+    const list = selected.size ? withEdits.filter((v) => selected.has(v.id)) : withEdits;
+    void exportPassportExcel("Электронный_паспорт_ВВСТ.xlsx", list, toInterval).then(
+      () => toast.success(`Экспортировано машин: ${list.length}`),
+      () => toast.error("Не удалось экспортировать файл"),
+    );
   };
 
   const exportAct = () => {
@@ -199,9 +230,6 @@ function VvstPage() {
         <Button variant="outline" onClick={() => setToOpen(true)}>
           Настроить ТО
         </Button>
-        <Button variant="outline" onClick={() => setColsOpen(true)}>
-          Столбцы
-        </Button>
         {WRITE_OFF_FILTERS.map((f) => (
           <Button
             key={f.label}
@@ -218,9 +246,8 @@ function VvstPage() {
           variant="danger"
           disabled={selected.size === 0}
           onClick={() => {
-            if (!window.confirm(`Удалить выбранные машины (${selected.size})?`)) return;
-            updateVehicles((list) => list.filter((v) => !selected.has(v.id)));
-            setSelected(new Set());
+            setDeleteTarget(selected);
+            setDeleteOpen(true);
           }}
         >
           Удалить выбранные
@@ -228,25 +255,17 @@ function VvstPage() {
         <Button variant="outline" onClick={() => window.print()}>
           Экспорт PDF
         </Button>
-        <Button onClick={() => fileRef.current?.click()}>Импорт Excel</Button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void importExcel(f);
-            e.target.value = "";
-          }}
-        />
+        <Button variant="outline" onClick={exportVvst}>
+          Экспорт ВВСТ
+        </Button>
+        <Button onClick={() => setImportOpen(true)}>Импорт Excel</Button>
       </Panel>
 
       <Panel className="thin-scroll max-h-[calc(100vh-20rem)] overflow-auto">
         <table className="w-max min-w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-muted">
             <tr className="border-b border-border">
-              <th className="w-12 px-3 py-3">
+              <th className="w-12 px-3 py-2">
                 <input
                   type="checkbox"
                   aria-label="Выбрать все"
@@ -254,16 +273,18 @@ function VvstPage() {
                   onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map(({ v }) => v.id)))}
                 />
               </th>
-              <HeaderCell n={1} label="№ п/п" width={70} onSort={() => toggleSort("n")} />
-              {visibleCols.map((c) => (
-                <HeaderCell key={c.key} n={COLUMNS.indexOf(c) + 2} label={c.label} width={c.width} center={c.align === "center"} onSort={() => toggleSort(c.key)} />
+              {PASSPORT_HEADERS.map((label, i) => (
+                <th key={i} className="min-w-[120px] max-w-[120px] px-2 py-2 text-left align-top text-xs font-normal">
+                  <span className="block text-[10px] text-muted-foreground">№ {i + 1}</span>
+                  {label}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ v, n }) => (
+            {rows.map(({ v, cells }) => (
               <tr key={v.id} className={cn("border-b border-border", selected.has(v.id) && "bg-accent")}>
-                <td className="px-3 py-3 text-center">
+                <td className="px-3 py-2 text-center align-top">
                   <input
                     type="checkbox"
                     aria-label={`Выбрать ${v.brand}`}
@@ -278,26 +299,26 @@ function VvstPage() {
                     }
                   />
                 </td>
-                <td className="px-3 py-3">{n}</td>
-                {visibleCols.map((c) => {
-                  const isEditing = editing?.id === v.id && editing.key === c.key;
-                  const raw = v[c.key];
-                  const display = raw === "" ? "—" : c.numeric ? formatNumber(Number(raw)) : String(raw);
+                {cells.map((raw, col) => {
+                  const editKey = EDITABLE_BY_COL[col];
+                  const isEditing = editKey !== undefined && editing?.id === v.id && editing.key === editKey;
+                  const display = raw === "" || raw === null || raw === undefined ? "" : NUMERIC_COLS.has(col) ? formatNumber(Number(raw)) : String(raw);
+                  const numeric = editKey ? COLUMNS.find((c) => c.key === editKey)?.numeric : false;
+                  const edited = editKey !== undefined && editedCells.has(`${v.id}:${editKey}`);
                   return (
                     <td
-                      key={c.key}
-                      style={{ minWidth: c.width, maxWidth: c.width }}
-                      className={cn("px-3 py-3 align-top", editedCells.has(`${v.id}:${c.key}`) && "bg-warning-soft")}
+                      key={col}
+                      className={cn("min-w-[120px] max-w-[120px] px-2 py-2 align-top text-xs", edited && "bg-warning-soft")}
                     >
                       {isEditing ? (
                         <Input
                           autoFocus
-                          defaultValue={String(raw)}
-                          type={c.numeric ? "number" : "text"}
-                          className="h-8"
+                          defaultValue={String(v[editKey as EditableKey] ?? "")}
+                          type={numeric ? "number" : "text"}
+                          className="h-7 w-full text-xs"
                           onBlur={(e) => {
-                            const value = c.numeric ? Number(e.target.value) : e.target.value;
-                            if (value !== raw) pushEdit({ id: v.id, key: c.key, value });
+                            const value = numeric ? Number(e.target.value) : e.target.value;
+                            if (value !== v[editKey as EditableKey]) pushEdit({ id: v.id, key: editKey, value });
                             setEditing(null);
                           }}
                           onKeyDown={(e) => {
@@ -306,11 +327,16 @@ function VvstPage() {
                           }}
                         />
                       ) : (
-                        <div className="flex items-start justify-between gap-2">
-                          <span className={cn("flex-1", c.align === "center" && "text-center")}>{display}</span>
-                          <button className="no-print shrink-0 text-xs text-subtle hover:text-foreground" onClick={() => setEditing({ id: v.id, key: c.key })}>
-                            Изм.
-                          </button>
+                        <div className="flex items-start justify-between gap-1">
+                          <span className="flex-1 whitespace-pre-wrap break-words">{display}</span>
+                          {editKey !== undefined && (
+                            <button
+                              className="no-print shrink-0 text-[10px] text-subtle hover:text-foreground"
+                              onClick={() => setEditing({ id: v.id, key: editKey })}
+                            >
+                              Изм.
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>
@@ -320,7 +346,7 @@ function VvstPage() {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={visibleCols.length + 2} className="py-10 text-center text-muted-foreground">
+                <td colSpan={PASSPORT_COLUMN_COUNT + 1} className="py-10 text-center text-muted-foreground">
                   Машины не найдены
                 </td>
               </tr>
@@ -386,26 +412,82 @@ function VvstPage() {
         }}
       />
 
-      <Modal open={colsOpen} onClose={() => setColsOpen(false)} title="Столбцы" size="sm">
-        <div className="flex flex-col gap-2.5">
-          {COLUMNS.map((c) => (
-            <label key={c.key} className="flex items-center gap-2.5 text-sm">
-              <input
-                type="checkbox"
-                checked={!hidden.has(c.key)}
-                onChange={() =>
-                  setHidden((h) => {
-                    const next = new Set(h);
-                    if (next.has(c.key)) next.delete(c.key);
-                    else next.add(c.key);
-                    return next;
-                  })
-                }
-              />
-              {c.label}
-            </label>
-          ))}
+      <Modal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        title="Импорт из Excel"
+        size="md"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setImportOpen(false)}>
+              Отмена
+            </Button>
+            <Button onClick={importExcel} disabled={!importFile}>
+              Импортировать {importFile ? `(${importFile.name})` : "(0)"}
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-3">
+          <div className="rounded bg-muted p-3 text-xs text-muted-foreground">
+            <p className="mb-2 font-semibold text-foreground">ФОРМАТ ФАЙЛА</p>
+            <p className="mb-2">
+              Поддерживаются шаблон паспорта АБТС и электронный паспорт (формуляр). Поля транспортного средства сохраняются в таблице, а распознанные поля (год выпуска, VIN, номера кузова, шасси и двигателя) также заносятся в СРТС.
+            </p>
+            <p>
+              Сроки действия выделяются красным. (Срок службы аккумуляторной батареи выделяется по достижении 4 лет, а износ шин — при отрицательном остатке ресурса. Для быстрого просмотра используйте фильтры «Фокус: АКБ» и «Фокус: шины».)
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={importUpdate} onChange={(e) => setImportUpdate(e.target.checked)} />
+            Обновлять существующие машины (по гос. номеру)
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Для обновления паспорта удалять машины по нужно. Обновление по госномеру сохраняет идентификаторы и связи с историей. Формулы загружаются из нового Excel-файла.
+          </p>
+          <Field label="ВЫБОР ФАЙЛА">
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              className="w-full text-sm"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                setImportFile(f ?? null);
+              }}
+            />
+          </Field>
         </div>
+      </Modal>
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Подтверждение удаления"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Отмена
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (deleteTarget) {
+                  updateVehicles((list) => list.filter((v) => !deleteTarget.has(v.id)));
+                  setSelected(new Set());
+                }
+                setDeleteOpen(false);
+                setDeleteTarget(null);
+              }}
+            >
+              Удалить
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm">
+          Вы уверены, что хотите удалить выбранные машины ({deleteTarget?.size ?? 0})? Это действие нельзя отменить.
+        </p>
       </Modal>
 
       <ToModal open={toOpen} onClose={() => setToOpen(false)} />
@@ -419,20 +501,6 @@ function VvstPage() {
         }}
       />
     </div>
-  );
-}
-
-function HeaderCell({ n, label, width, center, onSort }: { n: number; label: string; width: number; center?: boolean; onSort: () => void }) {
-  return (
-    <th style={{ minWidth: width, maxWidth: width }} className="th-cell px-3 py-3 align-middle">
-      <button onClick={onSort} className={cn("flex w-full items-center gap-2 text-left", center && "justify-center text-center")}>
-        <span>
-          <span className="block text-[10px] text-muted-foreground">№ {n}</span>
-          {label}
-        </span>
-        <ArrowUpDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-      </button>
-    </th>
   );
 }
 

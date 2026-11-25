@@ -76,10 +76,9 @@ function vehicleFrom(raw: Raw, index: number): Vehicle {
 }
 
 const JOURNAL: JournalRow[] = [
-  { id: "j1", date: "2026-11-21", unit: UBT, driver: "", waybill: "", brand: "Т-80БВМ", plate: "110", techState: "ТИ", speedometer: "ОПЛ", odometerOut: "2570", departTime: "3750", odometerIn: "", returnTime: "", dutyOfficer: "" },
-  { id: "j2", date: "2026-11-20", unit: UBT, driver: "", waybill: "", brand: "Т-14", plate: "122", techState: "ТИ", speedometer: "ОПЛ", odometerOut: "1802", departTime: "2050", odometerIn: "", returnTime: "", dutyOfficer: "" },
-  { id: "j3", date: "2026-11-18", unit: UBM, driver: "Иванов", waybill: "1243", brand: "АЦ-8 на МАЗ-5334", plate: "5208 АК 76 RUS", techState: "ТИ", speedometer: "ОПЛ", odometerOut: "84718", departTime: "", odometerIn: "85201", returnTime: "", dutyOfficer: "" },
-  { id: "j4", date: "2026-11-18", unit: UBM, driver: "", waybill: "", brand: "АЦ-8 на МАЗ-5334", plate: "5208 АК 76 RUS", techState: "ТИ", speedometer: "ОПЛ", odometerOut: "85201", departTime: "", odometerIn: "", returnTime: "", dutyOfficer: "" },
+  { id: 1, date: "2026-11-21", subdivision: UBT, driver: "", waybillNumber: "", brand: "Т-80БВМ", regNumber: "110", departureCondition: "ТИ", departureSeal: "ОПЛ", departureOdometer: 2570, departureTime: "", purpose: "", authority: "", returnDeadline: "18:00", arrivalDate: "", arrivalTime: "", arrivalCondition: "", arrivalSeal: "", arrivalOdometer: null, remarks: "", dutySignature: "" },
+  { id: 2, date: "2026-11-20", subdivision: UBT, driver: "", waybillNumber: "", brand: "Т-14", regNumber: "122", departureCondition: "ТИ", departureSeal: "ОПЛ", departureOdometer: 1802, departureTime: "", purpose: "", authority: "", returnDeadline: "18:00", arrivalDate: "", arrivalTime: "", arrivalCondition: "", arrivalSeal: "", arrivalOdometer: null, remarks: "", dutySignature: "" },
+  { id: 3, date: "2026-11-18", subdivision: UBM, driver: "Иванов", waybillNumber: "1243", brand: "АЦ-8 на МАЗ-5334", regNumber: "5208 АК 76 RUS", departureCondition: "ТИ", departureSeal: "ОПЛ", departureOdometer: 84718, departureTime: "", purpose: "", authority: "", returnDeadline: "18:00", arrivalDate: "", arrivalTime: "", arrivalCondition: "", arrivalSeal: "", arrivalOdometer: 85201, remarks: "", dutySignature: "" },
 ];
 
 const TRIPS: Trip[] = [

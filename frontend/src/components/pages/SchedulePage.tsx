@@ -47,6 +47,8 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ScheduleItem | null>(null);
   const [formData, setFormData] = useState<Partial<ScheduleItem>>({});
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
   const queryClient = useQueryClient();
 
@@ -93,9 +95,16 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   };
 
   const handleDelete = (id: number) => {
-    if (!window.confirm("Удалить запись?")) return;
-    const updated = items.filter((i) => i.id !== id);
+    setDeleteTarget(id);
+    setDeleteOpen(true);
+  };
+
+  const performDelete = () => {
+    if (deleteTarget === null) return;
+    const updated = items.filter((i) => i.id !== deleteTarget);
     saveMutation.mutate(updated);
+    setDeleteOpen(false);
+    setDeleteTarget(null);
   };
 
   const handleSave = () => {
@@ -440,6 +449,25 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
             </Field>
           )}
         </div>
+      </Modal>
+
+      <Modal
+        open={deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        title="Подтверждение удаления"
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+              Отмена
+            </Button>
+            <Button variant="danger" onClick={performDelete}>
+              Удалить
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm">Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
       </Modal>
     </div>
   );
