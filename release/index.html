@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Планирование ВВСТ</title>
+    <script type="module" crossorigin src="/assets/index-CnKwIwQf.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-C7_i9-yH.css">
+  </head>
+  <body>
+    <!-- Deprecated browsers (Chromium &lt; 111, e.g. Edge 92 on machines without
+         updates) silently drop all Tailwind v4 @layer rules, so the page shows
+         plain markup. The warning is shown by default and removed by JS when
+         the browser is modern enough; it stays visible if JS never runs.
+         All styling is inline because our compiled CSS cannot be relied on. -->
+    <div
+      id="browser-warning"
+      style="background: #b91c1c; color: #fff; font: 15px/1.4 system-ui, sans-serif; padding: 10px 16px; text-align: center"
+    >
+      Браузер слишком старый для этого приложения: страница не сможет
+      применить оформление. Откройте приложение в обновлённом Microsoft Edge,
+      Firefox или Chrome.
+    </div>
+    <div id="root"></div>
+    <script>
+      ;(function () {
+        var supported = false
+        try {
+          supported =
+            !!window.CSS &&
+            typeof CSS.supports === 'function' &&
+            CSS.supports('color', 'oklch(0.5 0.1 200)')
+        } catch (error) {
+          supported = false
+        }
+        if (supported) {
+          var warning = document.getElementById('browser-warning')
+          if (warning) warning.remove()
+        }
+      })()
+    </script>
+  </body>
+</html>

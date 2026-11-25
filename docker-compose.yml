@@ -1,0 +1,43 @@
+# Docker Compose для Military Planner
+# PostgreSQL + Backend (Python) + Frontend (React)
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: military-planner-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: military_planner
+      POSTGRES_USER: planner_app
+      POSTGRES_PASSWORD: planner_app_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner_app -d military_planner"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: military-planner-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MILITARY_PLANNER_DATABASE_URL: postgresql://planner_app:planner_app_password@postgres:5432/military_planner
+      MILITARY_PLANNER_PORT: 8000
+      MILITARY_PLANNER_HOST: 0.0.0.0
+      MILITARY_PLANNER_FRONTEND_DIR: /app/frontend/dist
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./release:/app/frontend/dist:ro
+
+volumes:
+  postgres_data:

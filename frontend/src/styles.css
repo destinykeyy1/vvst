@@ -1,0 +1,147 @@
+/*
+ * Tailwind v4 entry: config lives here, with no tailwind.config.js or PostCSS plugin.
+ * Keep every @import in this top block. Fonts load via <link> in src/routes/__root.tsx.
+ */
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design system: monochrome military-office dashboard.
+ * Near-black sidebar, white work area, hairline borders, black primary actions.
+ */
+
+@theme inline {
+  --font-sans: "Segoe UI", "Open Sans", system-ui, -apple-system, sans-serif;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-border: var(--destructive-border);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
+  --color-danger-dot: var(--danger-dot);
+  --color-success: var(--success);
+  --color-weekend: var(--weekend);
+  --color-highlight: var(--highlight);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-overlay: var(--overlay);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-active: var(--sidebar-active);
+  --color-sidebar-active-foreground: var(--sidebar-active-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+}
+
+:root {
+  --radius: 0.25rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.2 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.975 0 0);
+  --secondary-foreground: oklch(0.2 0 0);
+  --muted: oklch(0.985 0 0);
+  --muted-foreground: oklch(0.5 0 0);
+  --subtle: oklch(0.7 0 0);
+  --accent: oklch(0.96 0 0);
+  --accent-foreground: oklch(0.2 0 0);
+  --destructive: oklch(0.5 0.19 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --destructive-border: oklch(0.82 0.08 20);
+  --warning: oklch(0.7 0.17 55);
+  --warning-soft: oklch(0.99 0.025 95);
+  --warning-border: oklch(0.92 0.08 95);
+  --danger-dot: oklch(0.52 0.2 27);
+  --success: oklch(0.5 0.12 150);
+  --weekend: oklch(0.97 0 0);
+  --highlight: oklch(0.2 0 0);
+  --border: oklch(0.91 0 0);
+  --border-strong: oklch(0.82 0 0);
+  --input: oklch(0.86 0 0);
+  --ring: oklch(0.4 0 0);
+  --overlay: oklch(0 0 0 / 45%);
+  --sidebar: oklch(0.19 0 0);
+  --sidebar-foreground: oklch(0.86 0 0);
+  --sidebar-muted: oklch(0.6 0 0);
+  --sidebar-active: oklch(0.245 0 0);
+  --sidebar-active-foreground: oklch(0.99 0 0);
+  --sidebar-border: oklch(0.27 0 0);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html,
+  body {
+    font-family: var(--font-sans);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+@utility page-title {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+@utility eyebrow {
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+@utility th-cell {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--color-foreground);
+}
+
+@utility thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) var(--color-muted);
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
