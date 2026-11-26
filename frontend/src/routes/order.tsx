@@ -157,6 +157,32 @@ function OrderArchive() {
     },
     onError: error => toast.error(error instanceof Error ? error.message : "Не удалось сохранить изменения"),
   });
+  const [publishing, setPublishing] = useState<OrderDraft | null>(null);
+  const publish = useMutation({
+    mutationFn: async (draft: OrderDraft): Promise<Order> => {
+      const response = await fetch("/api/order-drafts/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: draft.id }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Не удалось опубликовать наряд");
+      return body;
+    },
+    onSuccess: async order => {
+      client.setQueryData<OrderDraft[]>(["order-drafts"], current =>
+        current?.filter(draft => draft.id !== order.id));
+      client.setQueryData<Order[]>(["orders"], current =>
+        [...(current ?? []).filter(existing => existing.id !== order.id), order]);
+      setPublishing(null);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["order-drafts"] }),
+        client.invalidateQueries({ queryKey: ["orders"] }),
+      ]);
+      toast.success(`Наряд на ${archiveDate(order.date)} опубликован`);
+    },
+    onError: error => toast.error(error instanceof Error ? error.message : "Не удалось опубликовать наряд"),
+  });
   const summary = (lines: OrderLine[]) =>
     `Строк: ${lines.length} · Подразделов: ${new Set(lines.map(line => line.section)).size}`;
   return (
@@ -178,11 +204,15 @@ function OrderArchive() {
                 <div className="mt-1 text-xs text-neutral-500">{summary(draft.lines)}</div>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button variant="danger" disabled={!ids.length || remove.isPending} onClick={() => setDeletion({ id: draft.id, ids })}>
+                <Button variant="danger" disabled={!ids.length || remove.isPending || publish.isPending} onClick={() => setDeletion({ id: draft.id, ids })}>
                   Удалить выбранные ({ids.length})
                 </Button>
-                <Button variant="outline" disabled={remove.isPending} onClick={() => setDeletion({ id: draft.id })}>
+                <Button variant="outline" disabled={remove.isPending || publish.isPending} onClick={() => setDeletion({ id: draft.id })}>
                   Удалить черновик
+                </Button>
+                <Button disabled={!draft.lines.length || remove.isPending || publish.isPending}
+                  onClick={() => setPublishing(draft)}>
+                  Опубликовать наряд
                 </Button>
               </div>
             </div>
@@ -206,6 +236,18 @@ function OrderArchive() {
       ))}
       <Modal open={opened !== null} onClose={() => setOpened(null)} title={opened ? `Наряд №${opened.orderNumber}` : "Наряд"} size="lg">
         {opened && <ArchiveTable lines={opened.lines} />}
+      </Modal>
+      <Modal open={publishing !== null} onClose={() => { if (!publish.isPending) setPublishing(null); }}
+        title="Опубликовать наряд?" size="sm"
+        footer={<>
+          <Button variant="outline" disabled={publish.isPending} onClick={() => setPublishing(null)}>Отмена</Button>
+          <Button disabled={!publishing || publish.isPending}
+            onClick={() => { if (publishing) publish.mutate(publishing); }}>
+            {publish.isPending ? "Публикация…" : "Опубликовать"}
+          </Button>
+        </>}>
+        <p className="text-sm">Черновик за {publishing ? archiveDate(publishing.date) : ""}
+          {" "}перейдёт в раздел «Опубликованные наряды».</p>
       </Modal>
       <Modal open={deletion !== null} onClose={() => { if (!remove.isPending) setDeletion(null); }}
         title={deletion?.ids ? "Удалить выбранные строки?" : "Удалить черновик?"} size="sm"

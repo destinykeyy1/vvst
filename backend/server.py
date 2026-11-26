@@ -1565,6 +1565,45 @@ class PlannerStore:
             rows = db.execute('SELECT payload FROM planner_items WHERE collection = %s ORDER BY item_id', (collection,)).fetchall()
         return [row[0] for row in rows]
 
+    def publish_order_draft(self, body):
+        _exact_fields(body, {'id'})
+        draft_id = body['id']
+        if type(draft_id) is not int or not 1 <= draft_id <= MAX_DATABASE_ID:
+            raise ValidationError('Некорректный идентификатор черновика')
+        with self.connect() as db:
+            db.execute('SELECT pg_advisory_xact_lock(%s, %s)', (1297108050, 2))
+            row = db.execute(
+                "SELECT payload FROM planner_items WHERE collection = 'order_drafts' AND item_id = %s FOR UPDATE",
+                (draft_id,),
+            ).fetchone()
+            published = db.execute(
+                "SELECT payload FROM planner_items WHERE collection = 'orders' AND item_id = %s",
+                (draft_id,),
+            ).fetchone()
+            if row is None:
+                if published is not None:
+                    return published[0]
+                raise ConflictError('Черновик уже удалён')
+            if published is not None:
+                raise ConflictError('Наряд с таким идентификатором уже существует')
+            draft = row[0]
+            if not draft['lines']:
+                raise ValidationError('В черновике нет строк')
+            number = db.execute(
+                "SELECT COALESCE(MAX((payload->>'orderNumber')::bigint), 0) + 1 "
+                "FROM planner_items WHERE collection = 'orders'"
+            ).fetchone()[0]
+            order = PublishedOrderDTO.parse({**draft, 'orderNumber': number})
+            db.execute(
+                "INSERT INTO planner_items (collection, item_id, payload) VALUES ('orders', %s, %s)",
+                (draft_id, Jsonb(order)),
+            )
+            db.execute(
+                "DELETE FROM planner_items WHERE collection = 'order_drafts' AND item_id = %s",
+                (draft_id,),
+            )
+        return order
+
     def replace_items(self, collection: 'str', values: 'Any', dto: 'type') -> 'list[dict[str, Any]]':
         if not isinstance(values, list):
             raise ValidationError('Тело запроса должно быть массивом')
@@ -2045,6 +2084,20 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
             path = urlparse(self.path).path
             if path.startswith('/api/documents/'):
                 self.handle_document(path)
+                return
+            if path == '/api/order-drafts/publish':
+                if not self.check_authentication():
+                    self.send_json(401, {'error': 'Требуется вход в приложение'})
+                    return
+                try:
+                    order = store.publish_order_draft(self.read_body())
+                    self.send_json(200, order)
+                except ValidationError as exc:
+                    self.send_json(400, {'error': str(exc)})
+                except (ConflictError, psycopg.errors.UniqueViolation) as exc:
+                    self.send_json(409, {'error': str(exc) if isinstance(exc, ConflictError) else 'Наряд уже существует'})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
                 return
             if path == '/api/duty/readings':
                 if not self.check_authentication():
