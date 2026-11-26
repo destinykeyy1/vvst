@@ -183,6 +183,26 @@ function OrderArchive() {
     },
     onError: error => toast.error(error instanceof Error ? error.message : "Не удалось опубликовать наряд"),
   });
+  const exportOrder = useMutation({
+    mutationFn: async (order: Order) => {
+      const response = await fetch("/api/documents/order/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ number: String(order.orderNumber), date: order.date, rows: order.lines }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? "Не удалось выгрузить наряд");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `Наряд_${order.orderNumber}_${archiveDate(order.date)}.xlsm`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    onError: error => toast.error(error instanceof Error ? error.message : "Не удалось выгрузить наряд"),
+  });
   const summary = (lines: OrderLine[]) =>
     `Строк: ${lines.length} · Подразделов: ${new Set(lines.map(line => line.section)).size}`;
   return (
@@ -231,7 +251,11 @@ function OrderArchive() {
             <span className="ml-2 rounded border bg-neutral-50 px-2 py-0.5 text-xs">Опубликован</span>
             <div className="mt-1 text-xs text-neutral-500">{summary(order.lines)}</div>
           </div>
-          <Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button>
+            <Button variant="outline" disabled={exportOrder.isPending || !order.lines.length}
+              onClick={() => exportOrder.mutate(order)}>Экспорт Excel</Button>
+          </div>
         </Panel>
       ))}
       <Modal open={opened !== null} onClose={() => setOpened(null)} title={opened ? `Наряд №${opened.orderNumber}` : "Наряд"} size="lg">
@@ -494,7 +518,7 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       let emptyMessage: string | undefined;
       if (!rows.length && !skipped.length) {
         if (duty) {
-          emptyMessage = "В постоянных средствах нет машин для подбора.";
+          emptyMessage = "В списке «Постоянные средства» нет машин. Этот раздел берёт машины из постоянных средств.";
         } else if (!items.length) {
           emptyMessage = "В расписании этого раздела пока нет записей.";
         } else if (!schedule.length) {

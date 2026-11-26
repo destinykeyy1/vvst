@@ -14,7 +14,7 @@ import time
 import webbrowser
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1226,34 +1226,153 @@ def _document_import(kind, data, vehicles, details):
     return rows
 
 
+def _document_order_resize(sheet, namespace, counts):
+    sheet_data = sheet.find(namespace + 'sheetData')
+    source_rows = {int(row.get('r')): row for row in sheet_data}
+    duty, duty_start, _ = ORDER_SECTIONS[0]
+    service, service_start, _ = ORDER_SECTIONS[1]
+    omitted = {duty_start - 1} if not counts[duty] else set()
+    extra = {}
+    retained = {}
+    for label, start, end in ORDER_SECTIONS:
+        # The last row for other events is a spacer before the signatures.
+        if label == ORDER_SECTIONS[-1][0]:
+            end -= 1
+        count = counts[label] + int(label == service)
+        keep = min(count, end - start + 1)
+        omitted.update(range(start + keep, end + 1))
+        if keep:
+            retained[label] = (start, start + keep - 1)
+            extra[start + keep - 1] = count - keep
+    mapping = {}
+    next_row = 1
+    for old in range(1, max(source_rows) + 1):
+        if old in omitted:
+            continue
+        mapping[old] = next_row
+        next_row += 1 + extra.get(old, 0)
+
+    def set_row_number(row, number):
+        row.set('r', str(number))
+        for cell in row.findall(namespace + 'c'):
+            cell.set('r', re.sub(r'\d+$', str(number), cell.get('r')))
+
+    for old, row in source_rows.items():
+        if old in omitted:
+            sheet_data.remove(row)
+            continue
+        number = mapping[old]
+        set_row_number(row, number)
+        anchor = sheet_data.index(row) if extra.get(old) else 0
+        for offset in range(1, extra.get(old, 0) + 1):
+            clone = deepcopy(row)
+            set_row_number(clone, number + offset)
+            sheet_data.insert(anchor + offset, clone)
+
+    def translate(ref):
+        def replace(match):
+            column, row = match.groups()
+            old = int(row)
+            new = mapping.get(old)
+            if old in omitted:
+                next_visible = next(number for number in range(old + 1, max(mapping) + 1) if number in mapping)
+                new = mapping[next_visible]
+            return column + str(old if new is None else new)
+        return re.sub(r'(\$?[A-Z]+\$?)(\d+)', replace, ref)
+
+    merges = sheet.find(namespace + 'mergeCells')
+    if merges is not None:
+        for merge in list(merges):
+            ref = merge.get('ref')
+            row_numbers = [int(number) for number in re.findall(r'\d+', ref)]
+            if row_numbers and all(number in omitted for number in row_numbers):
+                merges.remove(merge)
+            else:
+                merge.set('ref', translate(ref))
+        merges.set('count', str(len(merges)))
+
+    for node in sheet.iter():
+        if not isinstance(node.tag, str) or node.tag == namespace + 'mergeCell':
+            continue
+        for attr in ('ref', 'sqref', 'activeCell', 'topLeftCell'):
+            if attr in node.attrib:
+                node.set(attr, translate(node.get(attr)))
+        if node.tag.endswith('}sqref') and node.text:
+            node.text = translate(node.text)
+    slots = {
+        label: range(mapping[start] + int(start == service_start),
+                     mapping[end] + extra[end] + 1)
+        for label, (start, end) in retained.items()
+    }
+    return mapping, slots
+
+
+def _document_order_date(day):
+    months = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+              'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря')
+    return f'{day.day:02d}', months[day.month - 1], day.year
+
+
 def _document_order_export(template, body, vehicles, details):
     from lxml import etree
 
-    sections = {label: iter(range(start, end + 1)) for label, start, end in ORDER_SECTIONS}
-    updates = {f'{column}{row}': '' for _, start, end in ORDER_SECTIONS
-               for row in range(start, end + 1) for column in 'ABCDEFGHI'}
+    updates = {}
     order_number = _document_text(body.get('number'))
-    updates['A6'] = f'НАРЯД № {order_number or "________"}'
+    updates['A6'] = f'Наряд № {order_number or "________"}'
+    order_date = None
     if 'date' in body:
         _iso_date(body['date'], 'date')
-        updates['A8'] = date.fromisoformat(body['date']).strftime('%d.%m.%Y')
+        order_date = date.fromisoformat(body['date'])
+        day, month, year = _document_order_date(order_date)
+        previous_day, previous_month, previous_year = _document_order_date(order_date - timedelta(days=1))
+        previous = f'«{previous_day}» {previous_month} {previous_year} года'
+        updates.update(A4=previous, E4=previous, A8=f'на {day} {month} {year} года',
+                       A89=f'«{day}» {month} {year} г.')
+    section_names = {
+        'duty': ORDER_SECTIONS[0][0],
+        'training': ORDER_SECTIONS[2][0],
+        'household': ORDER_SECTIONS[3][0],
+        'other': ORDER_SECTIONS[4][0],
+    }
+    grouped = {label: [] for label, _, _ in ORDER_SECTIONS}
     for item in body['rows']:
-        section = _document_text(item.get('section'))
-        if section not in sections:
+        key = _document_text(item.get('section'))
+        section = section_names.get(key, key)
+        if section not in grouped:
             raise ValidationError('Выберите раздел наряда из шаблона')
-        row = next(sections[section], None)
-        if row is None:
-            raise ValidationError(f'Недостаточно строк в разделе «{section}»')
-        vehicle, card = _document_find_vehicle(item, vehicles, details)
-        values = _document_vehicle_values(vehicle, card)
-        for column, key in zip('ABCDEFGHI', ORDER_FIELDS):
-            updates[f'{column}{row}'] = _document_text(values[key] if key in
-                                                       ('brand', 'regNumber', 'usageGroup') else item.get(key))
+        # Camry already has a fixed row in the template.
+        plate = _document_key(item.get('regNumber') or '')
+        brand = _document_key(item.get('brand') or '')
+        if 'vehicleId' in item:
+            vehicle, _ = _document_find_vehicle(item, vehicles, details)
+            plate = _document_key(vehicle.get('regNumber') or '')
+            brand = _document_key(vehicle.get('brand') or '')
+        if plate in ('5757ак', '5757ak') and brand in ('тойотакамри', 'toyotacamry'):
+            continue
+        grouped[section].append(item)
     part = 'xl/worksheets/sheet1.xml'
     namespace = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
     output = BytesIO()
     with ZipFile(BytesIO(template)) as source, ZipFile(output, 'w') as target:
         sheet = etree.fromstring(source.read(part))
+        mapping, slots = _document_order_resize(
+            sheet, namespace, {label: len(items) for label, items in grouped.items()},
+        )
+        updates = {f'{address[0]}{mapping[int(address[1:])]}': value for address, value in updates.items()}
+        for section, row_numbers in slots.items():
+            for row, item in zip(row_numbers, grouped[section]):
+                if 'vehicleId' in item:
+                    vehicle, card = _document_find_vehicle(item, vehicles, details)
+                    passport = _document_vehicle_values(vehicle, card)
+                    values = {**item, **{field: passport[field] for field in ORDER_FIELDS[:3]}}
+                else:
+                    values = dict(item)
+                values['responsible'] = values.get('responsible') or values.get('driver')
+                values.update(departureTime='08.00', returnTime='18.00', note='')
+                if section == ORDER_SECTIONS[0][0] and order_date is not None:
+                    values['note'] = (order_date + timedelta(days=1)).strftime('%d.%m.%Y')
+                for column, field in zip('ABCDEFGHI', ORDER_FIELDS):
+                    updates[f'{column}{row}'] = _document_text(values.get(field))
         sheet_data = sheet.find(namespace + 'sheetData')
         xml_rows = {int(row.get('r')): row for row in sheet_data}
         for address, value in updates.items():
@@ -1272,11 +1391,6 @@ def _document_order_export(template, body, vehicles, details):
                 if not value:
                     continue
                 cell = etree.Element(namespace + 'c', r=address)
-                style_address = f'{address[0]}84'
-                sample_row = xml_rows.get(84)
-                sample = sample_row.find(f'{namespace}c[@r="{style_address}"]') if sample_row is not None else None
-                if sample is not None and sample.get('s') is not None:
-                    cell.set('s', sample.get('s'))
                 column = re.match(r'[A-Z]+', address).group()
                 position = next((i for i, node in enumerate(row)
                                  if node.tag == namespace + 'c' and

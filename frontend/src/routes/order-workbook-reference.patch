@@ -1,0 +1,128 @@
+diff --git a/backend/server.py b/backend/server.py
+--- a/backend/server.py
++++ b/backend/server.py
+@@ -1229,10 +1229,21 @@
+ def _document_order_resize(sheet, namespace, counts):
+     sheet_data = sheet.find(namespace + 'sheetData')
+     source_rows = {int(row.get('r')): row for row in sheet_data}
+-    duty, duty_start, duty_end = ORDER_SECTIONS[0]
+-    omitted = set(range(duty_start - 1, duty_end + 1)) if not counts[duty] else set()
+-    extra = {end: max(0, counts[label] - (end - start + 1))
+-             for label, start, end in ORDER_SECTIONS}
++    duty, duty_start, _ = ORDER_SECTIONS[0]
++    service, service_start, _ = ORDER_SECTIONS[1]
++    omitted = {duty_start - 1} if not counts[duty] else set()
++    extra = {}
++    retained = {}
++    for label, start, end in ORDER_SECTIONS:
++        # The last row for other events is a spacer before the signatures.
++        if label == ORDER_SECTIONS[-1][0]:
++            end -= 1
++        count = counts[label] + int(label == service)
++        keep = min(count, end - start + 1)
++        omitted.update(range(start + keep, end + 1))
++        if keep:
++            retained[label] = (start, start + keep - 1)
++            extra[start + keep - 1] = count - keep
+     mapping = {}
+     next_row = 1
+     for old in range(1, max(source_rows) + 1):
+@@ -1264,7 +1275,8 @@
+             old = int(row)
+             new = mapping.get(old)
+             if old in omitted:
+-                new = mapping[duty_end + 1]
++                next_visible = next(number for number in range(old + 1, max(mapping) + 1) if number in mapping)
++                new = mapping[next_visible]
+             return column + str(old if new is None else new)
+         return re.sub(r'(\$?[A-Z]+\$?)(\d+)', replace, ref)
+ 
+@@ -1288,25 +1300,34 @@
+         if node.tag.endswith('}sqref') and node.text:
+             node.text = translate(node.text)
+     slots = {
+-        label: range(mapping[start], mapping[end] + extra[end] + 1)
+-        for label, start, end in ORDER_SECTIONS if start not in omitted
++        label: range(mapping[start] + int(start == service_start),
++                     mapping[end] + extra[end] + 1)
++        for label, (start, end) in retained.items()
+     }
+     return mapping, slots
+ 
+ 
++def _document_order_date(day):
++    months = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
++              'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря')
++    return f'{day.day:02d}', months[day.month - 1], day.year
++
++
+ def _document_order_export(template, body, vehicles, details):
+     from lxml import etree
+ 
+     updates = {}
+     order_number = _document_text(body.get('number'))
+-    updates['A6'] = f'НАРЯД № {order_number or "________"}'
++    updates['A6'] = f'Наряд № {order_number or "________"}'
+     order_date = None
+     if 'date' in body:
+         _iso_date(body['date'], 'date')
+         order_date = date.fromisoformat(body['date'])
+-        current = order_date.strftime('%d.%m.%Y')
+-        previous = (order_date - timedelta(days=1)).strftime('%d.%m.%Y')
+-        updates.update(A4=previous, E4=previous, A8=current, A89=current)
++        day, month, year = _document_order_date(order_date)
++        previous_day, previous_month, previous_year = _document_order_date(order_date - timedelta(days=1))
++        previous = f'«{previous_day}» {previous_month} {previous_year} года'
++        updates.update(A4=previous, E4=previous, A8=f'на {day} {month} {year} года',
++                       A89=f'«{day}» {month} {year} г.')
+     section_names = {
+         'duty': ORDER_SECTIONS[0][0],
+         'training': ORDER_SECTIONS[2][0],
+@@ -1319,6 +1340,15 @@
+         section = section_names.get(key, key)
+         if section not in grouped:
+             raise ValidationError('Выберите раздел наряда из шаблона')
++        # Camry already has a fixed row in the template.
++        plate = _document_key(item.get('regNumber') or '')
++        brand = _document_key(item.get('brand') or '')
++        if 'vehicleId' in item:
++            vehicle, _ = _document_find_vehicle(item, vehicles, details)
++            plate = _document_key(vehicle.get('regNumber') or '')
++            brand = _document_key(vehicle.get('brand') or '')
++        if plate in ('5757ак', '5757ak') and brand in ('тойотакамри', 'toyotacamry'):
++            continue
+         grouped[section].append(item)
+     part = 'xl/worksheets/sheet1.xml'
+     namespace = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+@@ -1330,9 +1360,6 @@
+         )
+         updates = {f'{address[0]}{mapping[int(address[1:])]}': value for address, value in updates.items()}
+         for section, row_numbers in slots.items():
+-            for row in row_numbers:
+-                for column in 'ABCDEFGHI':
+-                    updates[f'{column}{row}'] = ''
+             for row, item in zip(row_numbers, grouped[section]):
+                 if 'vehicleId' in item:
+                     vehicle, card = _document_find_vehicle(item, vehicles, details)
+@@ -1341,7 +1368,7 @@
+                 else:
+                     values = dict(item)
+                 values['responsible'] = values.get('responsible') or values.get('driver')
+-                values.update(departureTime='08:00', returnTime='18:00', note='')
++                values.update(departureTime='08.00', returnTime='18.00', note='')
+                 if section == ORDER_SECTIONS[0][0] and order_date is not None:
+                     values['note'] = (order_date + timedelta(days=1)).strftime('%d.%m.%Y')
+                 for column, field in zip('ABCDEFGHI', ORDER_FIELDS):
+@@ -1364,12 +1391,6 @@
+                 if not value:
+                     continue
+                 cell = etree.Element(namespace + 'c', r=address)
+-                sample_number = mapping[84]
+-                style_address = f'{address[0]}{sample_number}'
+-                sample_row = xml_rows.get(sample_number)
+-                sample = sample_row.find(f'{namespace}c[@r="{style_address}"]') if sample_row is not None else None
+-                if sample is not None and sample.get('s') is not None:
+-                    cell.set('s', sample.get('s'))
+                 column = re.match(r'[A-Z]+', address).group()
+                 position = next((i for i, node in enumerate(row)
+                                  if node.tag == namespace + 'c' and
