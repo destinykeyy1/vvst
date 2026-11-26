@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { PasswordGate } from "@/components/PasswordGate";
 import { Button, Field, Input, Modal, PageHeader, Panel, Select } from "@/components/ui-kit";
 import { TYPE_LABELS, VehicleFormModal } from "@/components/VehicleForm";
-import { exportRowsToExcel } from "@/lib/excel";
 import {
   PASSPORT_HEADERS,
   exportPassportExcel,
@@ -292,21 +291,31 @@ function VvstPage() {
     );
   };
 
-  const exportAct = () => {
-    const list = withEdits.filter((v) => selected.has(v.id));
-    void exportRowsToExcel(
-      "Акт_тех_состояния.xlsx",
-      list.map((v, i) => ({
-        "№": i + 1,
-        "Марка машины": v.brand,
-        "Гос. рег. знак": v.plate,
-        "Подразделение": v.unit,
-        "Пробег, км": v.mileage,
-        "Моточасы": v.motoHours,
-        "Техническое состояние": v.status === "ready" ? "Исправна" : v.status === "repair" ? "В ремонте" : "Недоступна",
-        "До ТО, км": Math.max(0, toInterval - v.mileage),
-      })),
-    );
+  const exportAct = async () => {
+    if (selected.size !== 1) return;
+    const [vehicleId] = selected;
+    try {
+      const response = await fetch("/api/documents/condition/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Omsk" }),
+          rows: [{ vehicleId }],
+        }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error ?? "Не удалось сформировать акт");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "Акт_технического_состояния.docx";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось сформировать акт");
+    }
   };
 
   return (
@@ -500,7 +509,7 @@ function VvstPage() {
         >
           В постоянные средства
         </Button>
-        <Button variant="outline" disabled={selected.size === 0} onClick={exportAct}>
+        <Button variant="outline" disabled={selected.size !== 1} onClick={exportAct}>
           Акт тех. состояния
         </Button>
       </div>

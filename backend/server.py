@@ -695,7 +695,7 @@ def _document_key(value):
                    if char.isalnum())
 
 
-def _document_vehicle_values(vehicle, details):
+def _document_vehicle_values(vehicle, details, *, condition=False):
     certificate = details.get('certificate') or {}
     by_header = {}
     for item in vehicle.get('passportData') or []:
@@ -713,14 +713,14 @@ def _document_vehicle_values(vehicle, details):
                 return next(iter(values))
         return ''
 
-    return {
+    values = {
         'brand': vehicle['brand'],
         'regNumber': vehicle['regNumber'],
         'usageGroup': field('Группа эксплуатации') or certificate.get('usageGroup') or '',
-        'factoryNumber': field('Заводской номер', 'Заводской №', 'VIN')
+        'factoryNumber': field('Заводской номер машины', 'Заводской номер', 'Заводской №', 'VIN')
                          or certificate.get('factoryNumber') or certificate.get('vin') or '',
         'vin': field('VIN', 'Идентификационный номер (VIN)') or certificate.get('vin') or '',
-        'passportNumber': field('Номер паспорта (формуляра)', 'Номер паспорта',
+        'passportNumber': field('Серия и номер паспорта (формуляра)', 'Номер паспорта (формуляра)', 'Номер паспорта',
                                 'Номер формуляра', 'Паспорт (формуляр)'),
         'manufacturer': field('Завод-изготовитель', 'Изготовитель'),
         'chassisNumber': field('Номер шасси', 'Шасси №') or certificate.get('chassisNumber') or '',
@@ -729,6 +729,11 @@ def _document_vehicle_values(vehicle, details):
         'category': field('Категория', 'Категория машины'),
         'mileage': vehicle['currentMileage'],
     }
+
+    if condition:
+        values['field'] = field
+        values['passport'] = vehicle.get('passportData') or []
+    return values
 
 
 def _document_vehicle_label(values):
@@ -814,6 +819,115 @@ def _document_decimal(value, field):
         raise ValidationError(f'Укажите число в поле «{field}»') from exc
 
 
+def _condition_date(value):
+    text = str(value or '').strip().removesuffix('г.').strip()
+    for pattern in ('%Y-%m-%d', '%d.%m.%Y', '%Y-%m-%d %H:%M:%S'):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _condition_number(value):
+    try:
+        return _document_decimal(re.sub(r'\s+|км', '', str(value), flags=re.I), 'Наработка')
+    except ValidationError:
+        return None
+
+
+def _condition_months(value):
+    number = _condition_number(value)
+    if number is not None and number == int(number):
+        return int(number) * 12
+    years = re.search(r'(\d+)\s*(?:лет|год)', str(value), re.I)
+    months = re.search(r'(\d+)\s*мес', str(value), re.I)
+    if years or months:
+        return (int(years[1]) * 12 if years else 0) + (int(months[1]) if months else 0)
+    return None
+
+
+def _condition_elapsed(start, end):
+    if start is None or end < start:
+        return None
+    return (end.year - start.year) * 12 + end.month - start.month - (end.day < start.day)
+
+
+def _condition_duration(months):
+    if months is None:
+        return ''
+    years, rest = divmod(abs(months), 12)
+    text = ' '.join(part for part in (f'{years} г.' if years else '', f'{rest} мес.' if rest or not years else '') if part)
+    return ('−' if months < 0 else '') + text
+
+
+def _condition_km(value):
+    if value is None:
+        return ''
+    return f'{value:,.0f}'.replace(',', ' ').replace('-', '−') + ' км'
+
+
+def _condition_performance(data, item, act_date):
+    field = data['field']
+    supplied = item.get('performance', {})
+    if not isinstance(supplied, dict) or set(supplied) - {str(i) for i in range(1, 15)}:
+        raise ValidationError('Допустимые графы показателей: 1–14')
+
+    commissioned = _condition_date(field('Дата ввода в эксплуатацию') or supplied.get('1'))
+    elapsed = _condition_elapsed(commissioned, act_date)
+    initial = _condition_number(field('Показания спидометра при вводе в эксплуатацию',
+                                      'Начальные показания спидометра'))
+    current = _condition_number(data['mileage'])
+    baseline = {}
+    for entry in data['passport']:
+        match = re.search(r'(\d{2}\.\d{2}\.\d{4})', entry['header'])
+        if not match:
+            continue
+        stamp = _condition_date(match[1])
+        name = _document_key(entry['header'])
+        if name.startswith('показанияспидометрана'):
+            baseline.setdefault(stamp, {})['odometer'] = _condition_number(entry['value'])
+        elif name.startswith('наработкамашинысначалаэксплуатациина'):
+            baseline.setdefault(stamp, {})['work'] = _condition_number(entry['value'])
+
+    worked = current - initial if current is not None and initial is not None and current >= initial else None
+    if worked is None and current is not None:
+        complete = [stamp for stamp, row in baseline.items() if stamp is not None and stamp <= act_date
+                    and row.get('work') is not None and row.get('odometer') is not None
+                    and current >= row['odometer']]
+        if complete:
+            row = baseline[max(complete)]
+            worked = row['work'] + current - row['odometer']
+    if worked is None:
+        worked = _condition_number(field('Наработка машины с начала эксплуатации на текущую дату, км'))
+
+    resource = _condition_number(field('Назначенный ресурс',
+        'Скорректированная норма наработки на списание машины, км',
+        'Норма наработки на списание машины, км') or supplied.get('4'))
+    term = _condition_months(field('Назначенный срок эксплуатации', 'Срок эксплуатации',
+                                   'Срок службы по норме') or supplied.get('5') or item.get('norm'))
+    warranty_km, warranty_months = 50000, 15 * 12
+    repair_date = _condition_date(field('Дата последнего ремонта', 'Дата ремонта'))
+    repair_name = field('Вид последнего ремонта', 'Произведен ремонт')
+
+    def remaining(total, used, format_value):
+        return format_value(total - used) if total is not None and used is not None else ''
+
+    repair_start = _condition_number(field('Показания спидометра при последнем ремонте'))
+    return [
+        commissioned.strftime('%d.%m.%Y') if commissioned else '',
+        _condition_duration(elapsed), _condition_km(worked), _condition_km(resource),
+        _condition_duration(term), _condition_km(warranty_km), '15 лет',
+        ', '.join(part for part in (repair_name, repair_date.strftime('%d.%m.%Y') if repair_date else '') if part)
+        or supplied.get('8', ''),
+        _condition_duration(_condition_elapsed(repair_date, act_date)) or supplied.get('9', ''),
+        _condition_km(current - repair_start) if current is not None and repair_start is not None
+        and current >= repair_start else supplied.get('10', ''),
+        remaining(resource, worked, _condition_km), remaining(term, elapsed, _condition_duration),
+        remaining(warranty_km, worked, _condition_km), remaining(warranty_months, elapsed, _condition_duration),
+    ]
+
+
 def _document_word_export(kind, template, body, vehicles, details):
     doc = _document_word(template)
     table, first = _document_table(doc, kind)
@@ -840,37 +954,55 @@ def _document_word_export(kind, template, body, vehicles, details):
             raise ValidationError('Для акта технического состояния выберите одну машину')
         item = items[0]
         vehicle, card = _document_find_vehicle(item, vehicles, details)
-        data = _document_vehicle_values(vehicle, card)
+        data = _document_vehicle_values(vehicle, card, condition=True)
         doc.paragraphs[11].text = _document_vehicle_label(data)
         for index, label, key in ((19, 'Комплектность', 'completeness'),
                                   (20, 'Техническое состояние', 'condition'),
                                   (21, 'Причины досрочного износа или повреждения', 'reason'),
                                   (22, 'Заключение комиссии', 'conclusion')):
             doc.paragraphs[index].text = f'{label}: {_document_text(item.get(key))}'
-        performance = [''] * 14
-        performance[2] = data['mileage']
-        supplied = item.get('performance', {})
-        if not isinstance(supplied, dict) or set(supplied) - {str(i) for i in range(1, 15)}:
-            raise ValidationError('Допустимые графы показателей: 1–14')
-        for index, value in supplied.items():
-            if index != '3':
-                performance[int(index) - 1] = value
+        act_date = date.fromisoformat(body['date']) if stamp else date.today()
+        field = data['field']
+        performance = _condition_performance(data, item, act_date)
         _document_set_cells(_document_unique_cells(doc.tables[2].rows[3]), performance)
         entries = [{**item, 'material': data['brand'], 'factoryNumber': data['factoryNumber'],
                     'passportNumber': data['passportNumber'], 'manufacturer': data['manufacturer'],
+                    'code': field('Код по КВТ МО') or item.get('code'),
+                    'norm': performance[4], 'actual': performance[1],
                     'category': data['category'] or item.get('category'), 'unit': 'ед.', 'quantity': 1}]
-        for label, key in (('Шасси', 'chassisNumber'), ('Двигатель', 'engineNumber'),
-                           ('Кузов / кабина', 'bodyNumber')):
-            if data[key]:
-                entries.append({'material': label, 'factoryNumber': data[key],
+        for label, serial, model in (
+            ('Шасси', data['chassisNumber'], ''),
+            ('Двигатель', data['engineNumber'], field('Марка двигателя')),
+            ('Кузов / кабина', field('Кабина №', 'Кузов №') or data['bodyNumber'], ''),
+        ):
+            if serial or model:
+                entries.append({'material': ' '.join(part for part in (label, model) if part),
+                                'factoryNumber': serial, 'actual': performance[1],
                                 'unit': 'шт.', 'quantity': 1})
         for battery in card.get('batteries', []):
             entries.append({'material': f"АКБ {battery['brand']}",
-                            'factoryNumber': battery['number'], 'unit': 'шт.', 'quantity': 1})
+                            'factoryNumber': battery['number'],
+                            'norm': _condition_duration(_condition_months(battery['serviceLifeYears'])),
+                            'actual': _condition_duration(_condition_elapsed(_condition_date(battery['installDate']), act_date)),
+                            'unit': 'шт.', 'quantity': 1})
         for tire in card.get('tires', []):
             entries.append({'material': _document_tire_name(tire),
                             'factoryNumber': tire['serialNumbers'],
+                            'actual': _condition_duration(_condition_elapsed(_condition_date(tire['installDate']), act_date)),
                             'unit': 'шт.', 'quantity': tire['quantity']})
+        for records, names, label in (
+            (card.get('batteries'), ('Марка АКБ', 'Номер АКБ', 'Количество АКБ',
+              'Дата приведения (установки) АКБ', 'Завод изготовитель АКБ'), 'АКБ'),
+            (card.get('tires'), ('Марка, модель и размер шин (гусениц)', 'Номера шин (гусениц)',
+              'Количество шин (гусениц)', 'Дата установки шин (гусениц)', ''), 'Шины'),
+        ):
+            if records:
+                continue
+            model, serial, quantity, installed, manufacturer = [field(name) if name else '' for name in names]
+            if model or serial:
+                entries.append({'material': f'{label} {model}'.strip(), 'factoryNumber': serial,
+                                'quantity': quantity, 'unit': 'шт.', 'manufacturer': manufacturer,
+                                'actual': _condition_duration(_condition_elapsed(_condition_date(installed), act_date))})
         for row in rows:
             table._tbl.remove(row._tr)
         for index, entry in enumerate(entries, 1):
