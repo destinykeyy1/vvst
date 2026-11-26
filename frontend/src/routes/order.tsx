@@ -135,6 +135,7 @@ function OrderArchive() {
   const drafts = useQuery({ queryKey: ["order-drafts"], queryFn: () => apiGetCollection<OrderDraft>("order-drafts") });
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => apiGetCollection<Order>("orders") });
   const [opened, setOpened] = useState<Order | null>(null);
+  const [publishedDeletion, setPublishedDeletion] = useState<Order | null>(null);
   const [selected, setSelected] = useState<Record<number, number[]>>({});
   const [deletion, setDeletion] = useState<{ id: number; ids?: number[] } | null>(null);
   const remove = useMutation({
@@ -183,12 +184,31 @@ function OrderArchive() {
     },
     onError: error => toast.error(error instanceof Error ? error.message : "Не удалось опубликовать наряд"),
   });
-  const exportOrder = useMutation({
+  const removePublished = useMutation({
     mutationFn: async (order: Order) => {
+      const response = await fetch(`/api/orders/${order.id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error ?? "Не удалось удалить наряд");
+      }
+    },
+    onSuccess: async (_, order) => {
+      await client.cancelQueries({ queryKey: ["orders"] });
+      client.setQueryData<Order[]>(["orders"], current => current?.filter(row => row.id !== order.id));
+      setPublishedDeletion(null);
+      setOpened(current => current?.id === order.id ? null : current);
+      void client.invalidateQueries({ queryKey: ["orders"] });
+      toast.success(`Наряд №${order.orderNumber} удалён`);
+    },
+    onError: error => toast.error(error instanceof Error ? error.message : "Не удалось удалить наряд"),
+  });
+  const exportOrder = useMutation({
+    mutationFn: async (order: Order | OrderDraft) => {
+      const number = "orderNumber" in order ? String(order.orderNumber) : undefined;
       const response = await fetch("/api/documents/order/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ number: String(order.orderNumber), date: order.date, rows: order.lines }),
+        body: JSON.stringify({ number, date: order.date, rows: order.lines }),
       });
       if (!response.ok) {
         const error = await response.json().catch(() => null);
@@ -197,7 +217,7 @@ function OrderArchive() {
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = `Наряд_${order.orderNumber}_${archiveDate(order.date)}.xlsm`;
+      link.download = `Наряд_${number ?? "черновик"}_${archiveDate(order.date)}.xlsm`;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     },
@@ -230,6 +250,8 @@ function OrderArchive() {
                 <Button variant="outline" disabled={remove.isPending || publish.isPending} onClick={() => setDeletion({ id: draft.id })}>
                   Удалить черновик
                 </Button>
+                <Button variant="outline" disabled={exportOrder.isPending || !draft.lines.length}
+                  onClick={() => exportOrder.mutate(draft)}>Экспорт Excel</Button>
                 <Button disabled={!draft.lines.length || remove.isPending || publish.isPending}
                   onClick={() => setPublishing(draft)}>
                   Опубликовать наряд
@@ -255,6 +277,8 @@ function OrderArchive() {
             <Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button>
             <Button variant="outline" disabled={exportOrder.isPending || !order.lines.length}
               onClick={() => exportOrder.mutate(order)}>Экспорт Excel</Button>
+            <Button variant="danger" disabled={removePublished.isPending}
+              onClick={() => setPublishedDeletion(order)}>Удалить наряд</Button>
           </div>
         </Panel>
       ))}
@@ -272,6 +296,19 @@ function OrderArchive() {
         </>}>
         <p className="text-sm">Черновик за {publishing ? archiveDate(publishing.date) : ""}
           {" "}перейдёт в раздел «Опубликованные наряды».</p>
+      </Modal>
+      <Modal open={publishedDeletion !== null}
+        onClose={() => { if (!removePublished.isPending) setPublishedDeletion(null); }}
+        title="Удалить опубликованный наряд?" size="sm"
+        footer={<>
+          <Button variant="outline" disabled={removePublished.isPending}
+            onClick={() => setPublishedDeletion(null)}>Отмена</Button>
+          <Button variant="danger" disabled={!publishedDeletion || removePublished.isPending}
+            onClick={() => { if (publishedDeletion) removePublished.mutate(publishedDeletion); }}>Удалить</Button>
+        </>}>
+        {publishedDeletion && <p className="text-sm">
+          Наряд №{publishedDeletion.orderNumber} от {archiveDate(publishedDeletion.date)} будет удалён.
+        </p>}
       </Modal>
       <Modal open={deletion !== null} onClose={() => { if (!remove.isPending) setDeletion(null); }}
         title={deletion?.ids ? "Удалить выбранные строки?" : "Удалить черновик?"} size="sm"
@@ -300,12 +337,61 @@ function isDutyRequest(brand: string) {
   return /^(?:(?:санитарный|дежурный)\s+автомобиль|дежурное\s+средство|подвозочный\s+автомобиль|автомобиль\s+под\s+перевозку)(?:[\s(,.:–—»”"-]|$)/i.test(label);
 }
 
-function savedDutyRoster(lines: OrderLine[], date: string) {
-  const completed = lines.filter(line => line.section === "duty" &&
-    line.date && line.date <= date && line.brand.trim() && line.regNumber.trim());
-  const sourceDate = completed.reduce((latest, line) =>
-    line.date && line.date > latest ? line.date : latest, "");
-  return { sourceDate, rows: completed.filter(line => line.date === sourceDate) };
+type DutyTemplateRow = Pick<OrderLine,
+  "brand" | "regNumber" | "usageGroup" | "purpose" | "route" | "responsible" | "departureTime"
+>;
+
+const DUTY_TEMPLATE: readonly DutyTemplateRow[] = [
+  {
+    brand: "КТ-Л ТК6АМ Урал-4320", regNumber: "5609ак", usageGroup: "Уч.",
+    purpose: "Автомобильный тягач", route: "по парку", responsible: "Дежурный по парку", departureTime: "19:00",
+  },
+  {
+    brand: "АЦ-6,0-40 КАМАЗ-43118", regNumber: "5549ак", usageGroup: "Тр.",
+    purpose: "Пожарный автомобиль", route: "парк-по филиалу-парк", responsible: "", departureTime: "08:00",
+  },
+  {
+    brand: "МТО-АМ1 на УРАЛ-43203-1712-31", regNumber: "3468 КМ 87 RUS", usageGroup: "УЧ",
+    purpose: "Дежурный автомобиль", route: "парк-по Омску-парк", responsible: "Дежурный по филиалу", departureTime: "08:00",
+  },
+  {
+    brand: "УАЗ-ССА-1845 на базе УАЗ-396295", regNumber: "5664ак", usageGroup: "Тр.",
+    purpose: "Дежурный санитарный автомобиль", route: "парк-по Омску-парк",
+    responsible: "Дежурный фельдшер", departureTime: "08:00",
+  },
+  {
+    brand: "МТО-УБ1 (Урал-4320)", regNumber: "5617ак", usageGroup: "СТР",
+    purpose: "Резервный дежурный автомобиль", route: "парк-по филиалу-парк",
+    responsible: "Дежурный по филиалу", departureTime: "08:00",
+  },
+  {
+    brand: "Т-90А", regNumber: "140", usageGroup: "УБГ",
+    purpose: "Танковый тягач", route: "По парку", responsible: "Дежурный по парку", departureTime: "19:00",
+  },
+  {
+    brand: "Улан U20000", regNumber: "7173 ТТ 88 RUS", usageGroup: "УЧ",
+    purpose: "Дежурный автомобиль", route: "", responsible: "", departureTime: "19:00",
+  },
+  {
+    brand: "НЕФАЗ-9334-10", regNumber: "РМ 3272 87 RUS", usageGroup: "УЧ",
+    purpose: "Дежурный автомобиль", route: "", responsible: "", departureTime: "19:00",
+  },
+  {
+    brand: "МТО-АГ2М на КАМАЗ-5350", regNumber: "4716 АМ 76 RUS", usageGroup: "УЧ",
+    purpose: "Дежурный автомобиль", route: "", responsible: "", departureTime: "08:00",
+  },
+];
+
+function dutyTemplateRows(date: string, firstId: number): OrderLine[] {
+  return DUTY_TEMPLATE.map((row, index) => ({
+    ...row,
+    id: firstId + index,
+    section: "duty",
+    date,
+    driver: row.responsible,
+    returnTime: row.departureTime,
+    note: "",
+  }));
 }
 
 function trainingRoute(route: string) {
@@ -434,7 +520,6 @@ function OrderPage({ selectedDate, setSelectedDate }: {
   const vehicles = useAppState((s) => s.vehicles);
 
   const SCHEDULE_COLLECTION: Partial<Record<OrderTab, string>> = {
-    duty: "schedules",
     training: "schedules",
     household: "household-schedules",
     other: "other-schedules",
@@ -448,7 +533,6 @@ function OrderPage({ selectedDate, setSelectedDate }: {
     rows: OrderLine[];
     skipped: { label: string; reason: string }[];
     emptyMessage?: string;
-    dutySourceDate?: string;
   } | null>(null);
 
   const handleAutopick = async () => {
@@ -458,28 +542,14 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       const latest = queryClient.getQueryData<OrderLine[]>(["order-section-lines"]);
       if (!latest) throw new Error("Не удалось загрузить строки наряда");
       if (duty) {
-        const roster = savedDutyRoster(latest, selectedDate);
-        if (roster.rows.length) {
-          let nextId = latest.reduce((max, row) => Math.max(max, row.id), Date.now()) + 1;
-          setPreview({
-            dutySourceDate: roster.sourceDate,
-            skipped: [],
-            rows: roster.sourceDate === selectedDate
-              ? latest.filter(row => row.section === "duty" && row.date === selectedDate)
-              : roster.rows.map(row => ({
-              ...row,
-              id: nextId++,
-              date: selectedDate,
-              scheduleRowId: undefined,
-            })),
-          });
-          return;
-        }
+        const nextId = latest.reduce((max, row) => Math.max(max, row.id), Date.now()) + 1;
+        setPreview({ rows: dutyTemplateRows(selectedDate, nextId), skipped: [] });
+        return;
       }
       const collection = SCHEDULE_COLLECTION[activeTab];
       const [items, unavailable] = await Promise.all([
         collection ? apiGetCollection<ScheduleItem>(collection) : Promise.resolve([]),
-        duty ? Promise.resolve([]) : apiGetCollection<{ vehicleId: number; startDate: string; endDate: string }>("unavailable"),
+        apiGetCollection<{ vehicleId: number; startDate: string; endDate: string }>("unavailable"),
       ]);
       // Use the same dates as the marks in SchedulePage.
       const datesOf = (item: ScheduleItem) => [item.date, ...(item.scheduleDates ?? [])];
@@ -516,11 +586,10 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       for (const item of schedule) {
         const brand = item.requiredBrand?.trim() ?? "";
         const dutyRequest = isDutyRequest(brand);
-        if (duty && !dutyRequest) continue;
         const person = item.instructor || item.teacher || "";
         for (let index = 0; index < (item.requiredQuantity ?? 1); index++) {
           const label = brand || item.title;
-          if (!duty && dutyRequest) {
+          if (dutyRequest) {
             skipped.push({ label, reason: "Эта заявка относится к дежурным средствам." });
             continue;
           }
@@ -530,10 +599,6 @@ function OrderPage({ selectedDate, setSelectedDate }: {
             driver: person, responsible: person,
             departureTime: item.startTime || "", returnTime: item.endTime || "",
           };
-          if (duty) {
-            rows.push(line);
-            continue;
-          }
           const vehicle = candidates.find(candidate => brand &&
             candidate.brand.toLowerCase().includes(brand.toLowerCase()) &&
             !reserved.some(row => row.regNumber === candidate.plate && overlaps(row, line)));
@@ -547,9 +612,7 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       ].filter(Boolean).map(date => date?.split("-").reverse().join(".")).join(", ");
       let emptyMessage: string | undefined;
       if (!rows.length && !skipped.length) {
-        if (duty) {
-          emptyMessage = "На выбранную дату в расписании ОУП нет заявок на дежурные или подвозочные средства.";
-        } else if (!items.length) {
+        if (!items.length) {
           emptyMessage = "В расписании этого раздела пока нет записей.";
         } else if (!schedule.length) {
           emptyMessage = `На ${today} в расписании нет занятий.` +
@@ -619,7 +682,10 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       const drafts = await apiGetCollection<OrderDraft>("order-drafts");
       const draft = drafts.find(item => item.date === selectedDate);
       const incoming = new Set(chosen.map(row => row.id));
+      const dutyPlates = new Set(chosen.filter(row => row.section === "duty")
+        .map(row => row.regNumber.trim().toUpperCase()));
       const existing = (draft?.lines ?? []).filter(row => !incoming.has(row.id) &&
+        !(row.section === "duty" && dutyPlates.has(row.regNumber.trim().toUpperCase())) &&
         !chosen.some(line => row.section === line.section && row.scheduleRowId === line.scheduleRowId &&
           row.scheduleRowId != null && row.regNumber === line.regNumber));
       if (chosen.some(row => existing.some(other =>
@@ -851,12 +917,10 @@ function OrderPage({ selectedDate, setSelectedDate }: {
         {preview && <div className="space-y-4 text-sm">
           <p>Наряд · {today}. Подтверждение заменит строки раздела «{heading}» за выбранный день.</p>
           {training && <p>Подбираются свободные машины указанных марок из групп УЧ, УСГ, УБГ и СТР, начиная с наибольшего остатка годовой нормы.</p>}
-          {duty && (preview.dutySourceDate
-            ? <p>Использован сохранённый состав за {archiveDate(preview.dutySourceDate)}. Проверьте машины и ответственных перед сохранением.</p>
-            : <p>Сохранённого состава пока нет. Показаны заявки из расписания ОУП, для которых можно указать машину вручную.</p>)}
+          {duty && <p>На выбранную дату будет подставлен постоянный состав из девяти строк. После заполнения строки можно отредактировать.</p>}
           {preview.emptyMessage && <p className="rounded-md border bg-neutral-50 p-3">{preview.emptyMessage}</p>}
           <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
-            <p>{duty ? (preview.dutySourceDate ? "Строк из сохранённого состава" : "Заявок из расписания") : "Подобрано машин"}: {preview.rows.length}</p>
+            <p>{duty ? "Строк в постоянном составе" : "Подобрано машин"}: {preview.rows.length}</p>
             <p>Пропущено позиций: {preview.skipped.length}</p>
           </div>
           {preview.skipped.length > 0 && <div className="max-h-56 overflow-auto rounded-md border">

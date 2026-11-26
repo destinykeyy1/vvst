@@ -5,18 +5,11 @@ import { Button, Input, Panel } from "@/components/ui-kit";
 import { apiGetCollection } from "@/lib/api";
 import { setState } from "@/lib/store";
 import { vehicleFromDto } from "@/lib/backendMap";
+import { currentEngineHours } from "@/lib/engineHours";
 import type { VehicleDto } from "@/lib/types";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/duty")({ component: DutyPage });
-const hourField = "Текущие показания МОТОЧАСОВ";
-function hoursOf(vehicle?: VehicleDto) {
-  const value = vehicle?.passportData?.find(p => p.header.trim().replace(/\s+/g, " ").toLowerCase() === hourField.toLowerCase())?.value;
-  if (value == null || String(value).trim() === "") return null;
-  const hours = Number(String(value).replace(/\s+/g, "").replace(",", "."));
-  return Number.isFinite(hours) && hours >= 0 ? hours : null;
-}
-
 const label = "block text-xs uppercase leading-4 text-[#737373]";
 const hint = "text-xs leading-4 text-[#737373]";
 const readingBox = "rounded-md border border-[#e2e2e2] px-3 py-3 text-sm";
@@ -41,13 +34,13 @@ function DutyPage() {
   const [saved, setSaved] = useState(false);
   const shown = vehicles.filter(v => `${v.brand} ${v.regNumber}`.toLowerCase().includes(query.trim().toLowerCase()));
   const vehicle = vehicles.find(v => v.id === selected);
-  const startHours = hoursOf(vehicle);
+  const startHours = currentEngineHours(vehicle);
   const endKm = km === "" ? null : Number(km);
   const endHours = hours === "" ? null : Number(hours);
   const kmDiff = vehicle && endKm !== null ? endKm - vehicle.currentMileage : null;
   const hoursDiff = startHours !== null && endHours !== null ? endHours - startHours : null;
   const invalid = (endKm !== null && (!Number.isSafeInteger(endKm) || (kmDiff ?? 0) < 0)) ||
-    (endHours !== null && (!Number.isFinite(endHours) || endHours < (startHours ?? 0)));
+    (endHours !== null && (!Number.isFinite(endHours) || startHours === null || endHours < startHours));
   const save = useMutation({
     mutationFn: async () => {
       if (!vehicle || !date || invalid || (endKm === null && endHours === null)) {
@@ -129,8 +122,8 @@ function DutyPage() {
               </label>
               <label className="block space-y-1">
                 <span className={label}>Конечные моточасы</span>
-                <Input type="number" step="any" min={startHours ?? 0} placeholder="Введите значение" value={hours} onChange={e => { setHours(e.target.value); setSaved(false); }} />
-                {startHours === null && <span className={`block ${hint}`}>Первое показание станет начальным. Для расчёта наработки нужны два показания.</span>}
+                <Input type="number" step="any" disabled={startHours === null} min={startHours ?? 0} placeholder="Введите значение" value={hours} onChange={e => { setHours(e.target.value); setSaved(false); }} />
+                {startHours === null && <span className={`block ${hint}`}>Внесите начальные моточасы в перечне ВВСТ.</span>}
               </label>
               <div className="space-y-1">
                 <span className={label}>Пройдено за день</span>

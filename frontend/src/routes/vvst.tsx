@@ -118,6 +118,25 @@ function passportHours(vehicle: Vehicle) {
   return field ? toNumber(field.value) : vehicle.motoHours;
 }
 
+function applyVehicleEdit(vehicle: Vehicle, edit: Edit): Vehicle {
+  if (edit.key !== "motoHours" || typeof edit.value !== "number" || !vehicle.rawDto) {
+    return { ...vehicle, [edit.key]: edit.value };
+  }
+
+  const value = edit.value;
+  const fields = vehicle.rawDto.passportData ?? [];
+  const isHours = (field: (typeof fields)[number]) => {
+    const header = field.header.toLowerCase().replace(/[^а-яё0-9]/g, "");
+    return !/\d|сначала|норм/.test(header) && header.includes("моточас") &&
+      (header.includes("текущ") || ("ordinal" in field && field.ordinal === 103));
+  };
+  const header = "Текущие показания МОТОЧАСОВ";
+  const passportData = fields.some(isHours)
+    ? fields.map(field => isHours(field) ? { ...field, header, value } : field)
+    : [...fields, { header, value, column: fields.reduce((max, field) => Math.max(max, field.column), 0) + 1 }];
+  return { ...vehicle, motoHours: edit.value, rawDto: { ...vehicle.rawDto, passportData } };
+}
+
 const PLATE_LETTERS: Record<string, string> = {
   А: "A", В: "B", Е: "E", К: "K", М: "M", Н: "H",
   О: "O", Р: "P", С: "C", Т: "T", У: "Y", Х: "X",
@@ -215,7 +234,7 @@ function VvstPage() {
   const save = () => {
     updateVehicles((list) => list.map((vehicle) =>
       edits.reduce((updated, edit) => edit.id === vehicle.id
-        ? { ...updated, [edit.key]: edit.value }
+        ? applyVehicleEdit(updated, edit)
         : updated, vehicle),
     ));
     toast.success(`Сохранено изменений: ${edits.length}`);

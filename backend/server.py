@@ -695,6 +695,55 @@ def _document_key(value):
                    if char.isalnum())
 
 
+CURRENT_HOURS_HEADER = 'Текущие показания МОТОЧАСОВ'
+
+
+def _current_hours_field(field):
+    key = _document_key(field.get('header', ''))
+    if key in ('103', 'n103'):
+        return True
+    if re.search(r'\d|сначала|норм|загод|замесяц|засутки|запериод|остаток', key):
+        return False
+    return 'моточас' in key and (
+        'текущ' in key or str(field.get('ordinal')) == '103'
+        or key == 'показаниясчетчикамоточасов'
+    )
+
+
+def _passport_hours_value(value):
+    if type(value) not in (int, float, str):
+        return None
+    token = re.sub(r'\s+', '', str(value).casefold()).replace(',', '.')
+    token = re.sub(r'(?:моточас(?:ов|а)?|моточ|мч|м\.ч\.?|ч\.?)$', '', token)
+    if not re.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?', token):
+        return None
+    try:
+        number = float(token)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _passport_current_hours(vehicle):
+    values = (_passport_hours_value(field.get('value'))
+              for field in vehicle.get('passportData') or [] if _current_hours_field(field))
+    # In legacy records an empty or smaller shadow value may have been added after import.
+    return max((value for value in values if value is not None), default=None)
+
+
+def _vehicle_with_current_hours(vehicle):
+    hours = _passport_current_hours(vehicle)
+    if hours is None:
+        return vehicle
+    return {
+        **vehicle,
+        'passportData': [
+            {**field, 'header': CURRENT_HOURS_HEADER, 'value': hours} if _current_hours_field(field) else field
+            for field in vehicle['passportData']
+        ],
+    }
+
+
 def _document_vehicle_values(vehicle, details, *, condition=False):
     certificate = details.get('certificate') or {}
     by_header = {}
@@ -1496,19 +1545,6 @@ class PlannerStore:
         return matches[0] if len(matches) == 1 else None
 
     @staticmethod
-    def _vehicle_hours(vehicle):
-        field = next((item for item in vehicle.get('passportData') or []
-                      if _document_key(item['header']) == 'текущиепоказаниямоточасов'), None)
-        value = field['value'] if field is not None else None
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            number = float(''.join(str(value).split()).replace(',', '.'))
-        except ValueError:
-            return None
-        return number if math.isfinite(number) and number >= 0 else None
-
-    @staticmethod
     def _write_vehicle_readings(db, vehicle, km, hours):
         updated = dict(vehicle)
         if km is not None:
@@ -1519,13 +1555,14 @@ class PlannerStore:
         if odometer is not None and km is not None:
             odometer['value'] = km
         if hours is not None:
-            field = next((field for field in fields
-                          if _document_key(field['header']) == 'текущиепоказаниямоточасов'), None)
-            if field is None:
-                field = {'header': 'Текущие показания МОТОЧАСОВ',
+            matches = [field for field in fields if _current_hours_field(field)]
+            if not matches:
+                field = {'header': CURRENT_HOURS_HEADER,
                          'column': max((field['column'] for field in fields), default=0) + 1}
                 fields.append(field)
-            field['value'] = hours
+                matches.append(field)
+            for field in matches:
+                field.update(header=CURRENT_HOURS_HEADER, value=hours)
         if odometer is not None or hours is not None:
             updated['passportData'] = fields
         VehicleDTO.parse(updated)
@@ -1570,15 +1607,17 @@ class PlannerStore:
                 raise ValidationError('Машина не найдена в перечне ВВСТ')
             vehicle = row[0]
             start_km = vehicle['currentMileage']
-            if body['startKm'] != start_km or start_hours != self._vehicle_hours(vehicle):
+            if body['startKm'] != start_km or start_hours != _passport_current_hours(vehicle):
                 raise ConflictError('Показания изменились. Проверьте новые начальные значения.')
+            if end_hours is not None and start_hours is None:
+                raise ValidationError('Сначала внесите начальные моточасы в Перечне ВВСТ')
             if end_km is not None and end_km < start_km or (
                 end_hours is not None and start_hours is not None and end_hours < start_hours
             ):
                 raise ValidationError('Конечные показания не могут быть меньше начальных')
             self._write_vehicle_readings(db, vehicle, end_km, end_hours)
             km = end_km - start_km if end_km is not None else None
-            hours = end_hours - start_hours if end_hours is not None and start_hours is not None else None
+            hours = float(Decimal(str(end_hours)) - Decimal(str(start_hours))) if end_hours is not None else None
             if km is not None or hours is not None:
                 self._append_exploitation(db, {
                     'vehicleId': vehicle_id, 'date': body['date'],
@@ -1620,7 +1659,7 @@ class PlannerStore:
         )
         if vehicle is not None and entry.get('arrivalDate') and entry.get('arrivalTime'):
             km, hours = entry.get('arrivalOdometer'), entry.get('arrivalEngineHours')
-            current_km, current_hours = vehicle['currentMileage'], self._vehicle_hours(vehicle)
+            current_km, current_hours = vehicle['currentMileage'], _passport_current_hours(vehicle)
             if km is not None and km < current_km and not (
                 same_vehicle and current_km == previous.get('arrivalOdometer')
             ):
@@ -1677,7 +1716,16 @@ class PlannerStore:
     def list_items(self, collection: 'str') -> 'list[dict[str, Any]]':
         with self.connect() as db:
             rows = db.execute('SELECT payload FROM planner_items WHERE collection = %s ORDER BY item_id', (collection,)).fetchall()
-        return [row[0] for row in rows]
+        return [_vehicle_with_current_hours(row[0]) if collection == 'vehicles' else row[0] for row in rows]
+
+    def delete_published_order(self, order_id):
+        with self.connect() as db:
+            db.execute('SELECT pg_advisory_xact_lock(%s, %s)', (1297108050, 2))
+            result = db.execute(
+                "DELETE FROM planner_items WHERE collection = 'orders' AND item_id = %s",
+                (order_id,),
+            )
+            return result.rowcount == 1
 
     def publish_order_draft(self, body):
         _exact_fields(body, {'id'})
@@ -2448,6 +2496,25 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
 
         def do_DELETE(self) -> 'None':
             path = urlparse(self.path).path
+            order_match = re.fullmatch(r'/api/orders/([1-9][0-9]{0,18})', path)
+            if order_match:
+                if not self.check_authentication():
+                    self.send_json(401, {'error': 'Требуется вход в приложение'})
+                    return
+                order_id = int(order_match[1])
+                if order_id > MAX_DATABASE_ID:
+                    self.send_json(400, {'error': 'Некорректный идентификатор наряда'})
+                    return
+                try:
+                    deleted = store.delete_published_order(order_id)
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
+                    return
+                if not deleted:
+                    self.send_json(404, {'error': 'Опубликованный наряд не найден'})
+                    return
+                self.send_json(200, {'deleted': True})
+                return
             if path == '/api/vehicles':
                 try:
                     body = self.read_body()

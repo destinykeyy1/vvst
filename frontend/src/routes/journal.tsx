@@ -1,3 +1,4 @@
+import { currentEngineHours } from "@/lib/engineHours";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useRef, useState } from "react";
@@ -24,19 +25,6 @@ type RegistryVehicle = {
   currentMileage: number;
   passportData?: { header: string; value: unknown }[] | null;
 };
-
-function passportEngineHours(vehicle: RegistryVehicle) {
-  const reading = vehicle.passportData?.find(({ header }) =>
-    header.trim().replace(/\s+/g, " ").toLocaleLowerCase("ru") === "текущие показания моточасов",
-  )?.value;
-
-  if (typeof reading !== "number" && typeof reading !== "string") return null;
-  if (typeof reading === "string" && !reading.trim()) return null;
-  const value = typeof reading === "number"
-    ? reading
-    : Number(reading.trim().replace(/\s+/g, "").replace(",", "."));
-  return Number.isFinite(value) && value >= 0 ? value : null;
-}
 
 type RegistryVehicleDetails = {
   vehicleId: number;
@@ -425,7 +413,7 @@ function JournalPage() {
         brand: vehicle.brand,
         regNumber: vehicle.regNumber,
         departureOdometer: vehicle.currentMileage,
-        departureEngineHours: passportEngineHours(vehicle),
+        departureEngineHours: currentEngineHours(vehicle),
       },
     });
   }
