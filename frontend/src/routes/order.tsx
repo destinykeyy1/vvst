@@ -1,7 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Download, FileText } from "lucide-react";
-import { Button, Field, Input, Modal, PageHeader, Panel } from "@/components/ui-kit";
+import { Button, Input, Modal, PageHeader, Panel } from "@/components/ui-kit";
 import { PasswordGate } from "@/components/PasswordGate";
 import { apiGetCollection, apiPutCollection, type ScheduleItem } from "@/lib/api";
 import { readExcelRows, pickString } from "@/lib/excel";
@@ -60,7 +59,7 @@ function OrderArchive() {
     <Modal open={!!opened} onClose={() => setOpened(null)} title={"Наряд №" + (opened?.orderNumber ?? "")}><table className="w-full text-left text-sm"><thead><tr><th>Марка</th><th>Регистрационный знак</th></tr></thead><tbody>{opened?.lines.map((line,i) => <tr key={i}><td>{line.brand}</td><td>{line.regNumber}</td></tr>)}</tbody></table></Modal></div>;
 }
 
-type TrainingDraft = { id: number; date: string; lines: OrderLine[] };
+type OrderDraft = { id: number; date: string; lines: OrderLine[] };
 
 function eligibleTrainingVehicle(vehicle: { brand: string; plate: string; group?: string }) {
   const plate = vehicle.plate.trim();
@@ -79,6 +78,7 @@ function trainingRoute(route: string) {
 
 function overlaps(a: OrderLine, b: OrderLine) {
   if (!a.departureTime || !a.returnTime || !b.departureTime || !b.returnTime) return true;
+  if (a.returnTime <= a.departureTime || b.returnTime <= b.departureTime) return true;
   return a.departureTime < b.returnTime && b.departureTime < a.returnTime;
 }
 
@@ -91,6 +91,10 @@ function OrderPage() {
   const [picking, setPicking] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const training = activeTab === "training";
+  const duty = activeTab === "duty";
+  const [changes, setChanges] = useState<Record<number, Partial<OrderLine>>>({});
+  const [importing, setImporting] = useState(false);
+  const hasChanges = Object.keys(changes).length > 0;
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Set<number> | null>(null);
@@ -102,8 +106,9 @@ function OrderPage() {
     queryFn: () => apiGetCollection<OrderLine>("order-section-lines"),
   });
 
-  const filteredLines = lines.filter((line) => line.section === activeTab &&
-    (!training || line.date === selectedDate));
+  const displayedLines = lines.map(line => ({ ...line, ...changes[line.id] }));
+  const filteredLines = displayedLines.filter(line => line.section === activeTab &&
+    (line.date === selectedDate || (duty && !line.date)));
 
   const saveMutation = useMutation({
     mutationFn: async (data: OrderLine[]) => {
@@ -154,11 +159,18 @@ function OrderPage() {
     setDeleteTarget(null);
   };
 
-  const handleCellEdit = (id: number, field: keyof OrderLine, value: string) => {
-    const updated = lines.map((line) =>
-      line.id === id ? { ...line, [field]: value } : line
-    );
-    saveMutation.mutate(updated);
+  const editLine = (id: number, fields: Partial<OrderLine>) => {
+    setChanges(current => ({ ...current, [id]: { ...current[id], ...fields } }));
+  };
+
+  const saveChanges = async () => {
+    if (busy || !hasChanges) return;
+    try {
+      await saveMutation.mutateAsync(displayedLines);
+      setChanges({});
+    } catch {
+      // The mutation reports the error and the edits stay in the table.
+    }
   };
 
   const toggleRowSelection = (id: number) => {
@@ -188,15 +200,16 @@ function OrderPage() {
     other: "other-schedules",
   };
 
-  const trainingVehicles = vehicles.filter(eligibleTrainingVehicle);
-  const busy = isLoading || picking || transferring || saveMutation.isPending;
+  const allowedVehicles = vehicles.filter(eligibleTrainingVehicle);
+  const busy = isLoading || importing || picking || transferring || saveMutation.isPending;
   const today = selectedDate.split("-").reverse().join(".");
 
-  const handleTrainingAutopick = async () => {
-    if (busy || !selectedDate) return;
+  const handleAutopick = async () => {
+    const collection = SCHEDULE_COLLECTION[activeTab];
+    if (busy || hasChanges || !selectedDate || !collection) return;
     setPicking(true);
     try {
-      const items = await apiGetCollection<ScheduleItem>("schedules");
+      const items = await apiGetCollection<ScheduleItem>(collection);
       const latest = queryClient.getQueryData<OrderLine[]>(["order-section-lines"]);
       if (!latest) throw new Error("Не удалось загрузить строки наряда");
       const schedule = items.filter(item => item.date === selectedDate ||
@@ -217,8 +230,8 @@ function OrderPage() {
             driver: person, responsible: person,
             departureTime: item.startTime || "", returnTime: item.endTime || "", note: "",
           };
-          const vehicle = brand && trainingVehicles.find(candidate =>
-            candidate.brand.toLowerCase().includes(brand.toLowerCase()) &&
+          const vehicle = allowedVehicles.find(candidate =>
+            (!brand || candidate.brand.toLowerCase().includes(brand.toLowerCase())) &&
             !reserved.some(row => row.regNumber === candidate.plate && overlaps(row, line)),
           );
           if (vehicle) {
@@ -249,26 +262,37 @@ function OrderPage() {
     }
   };
 
-  const changeTrainingVehicle = (line: OrderLine, plate: string) => {
-    const vehicle = trainingVehicles.find(candidate => candidate.plate === plate);
-    if (vehicle && lines.some(row => row.id !== line.id && row.date === selectedDate &&
+  const changeVehicle = (line: OrderLine, plate: string) => {
+    const vehicle = allowedVehicles.find(candidate => candidate.plate === plate);
+    if (vehicle && displayedLines.some(row => row.id !== line.id && row.date === selectedDate &&
         row.regNumber === plate && overlaps(row, line))) {
       toast.error("Машина уже назначена на это время");
       return;
     }
-    saveMutation.mutate(lines.map(row => row.id === line.id ? {
-      ...row,
-      brand: vehicle?.brand ?? row.brand,
-      regNumber: vehicle?.plate ?? "",
-      usageGroup: vehicle?.group ?? "",
-    } : row));
+    const fields = {
+      brand: vehicle?.brand ?? (duty ? line.brand : ""),
+      regNumber: vehicle?.plate ?? (duty ? line.regNumber : ""),
+      usageGroup: vehicle?.group ?? (duty ? line.usageGroup : ""),
+    };
+    if (training) {
+      saveMutation.mutate(lines.map(row => row.id === line.id ? { ...row, ...fields } : row));
+    } else {
+      editLine(line.id, fields);
+    }
   };
 
-  const transferTraining = async () => {
-    const chosen = filteredLines.filter(row => selectedRows.has(row.id));
-    if (busy || !chosen.length) return;
-    if (chosen.some(row => !trainingVehicles.some(vehicle => vehicle.plate === row.regNumber))) {
-      toast.error("Выберите допустимую машину в каждой отмеченной строке");
+  const transferRows = async () => {
+    if (busy || hasChanges || !selectedDate) return;
+    const chosen = filteredLines.filter(row => selectedRows.has(row.id))
+      .map(row => ({ ...row, date: row.date || selectedDate }));
+    if (!chosen.length) return;
+    if (chosen.some(row => {
+      const vehicle = vehicles.find(candidate => candidate.plate === row.regNumber);
+      return vehicle ? !eligibleTrainingVehicle(vehicle) :
+        !duty || !eligibleTrainingVehicle({ brand: row.brand, plate: row.regNumber, group: row.usageGroup }) ||
+        !row.brand.trim();
+    })) {
+      toast.error("Укажите допустимую машину в каждой отмеченной строке");
       return;
     }
     if (chosen.some(row => lines.some(other => other.id !== row.id && other.date === selectedDate &&
@@ -278,7 +302,7 @@ function OrderPage() {
     }
     setTransferring(true);
     try {
-      const drafts = await apiGetCollection<TrainingDraft>("order-drafts");
+      const drafts = await apiGetCollection<OrderDraft>("order-drafts");
       const draft = drafts.find(item => item.date === selectedDate);
       const incoming = new Set(chosen.map(row => row.id));
       const existing = (draft?.lines ?? []).filter(row => !incoming.has(row.id) &&
@@ -306,54 +330,9 @@ function OrderPage() {
     }
   };
 
-  const handleOtherAutopick = async () => {
-    const collection = SCHEDULE_COLLECTION[activeTab];
-    if (!collection) {
-      toast.info("Для этого раздела нет источника расписания");
-      return;
-    }
-    try {
-      const items = await apiGetCollection<ScheduleItem>(collection);
-      const isBmp4xx = (plate: string) => /^4\d{2}/.test(plate.replace(/\s/g, ""));
-      const isSsh = (v: { group?: string }) => /СШ|сверхштат/i.test(v.group ?? "");
-      const matched = vehicles.filter((v) => !isBmp4xx(v.plate) || isSsh(v));
-      const newLines: OrderLine[] = [];
-      let idBase = Date.now();
-      for (const item of items) {
-        const need = item.requiredQuantity || 1;
-        const pool = matched.filter((v) => !item.requiredBrand || v.brand.toLowerCase().includes(item.requiredBrand.toLowerCase()));
-        const picked = pool.slice(0, need);
-        const rows = picked.length ? picked : [null];
-        for (const v of rows) {
-          newLines.push({
-            id: idBase++,
-            section: activeTab,
-            brand: v?.brand ?? item.requiredBrand,
-            regNumber: v?.plate ?? "",
-            usageGroup: v?.group ?? "",
-            driver: item.instructor || item.teacher || "",
-            route: item.route || item.location || "",
-            purpose: item.title,
-            departureTime: item.startTime || "",
-            returnTime: item.endTime || "",
-            responsible: "",
-            note: item.location || "",
-            date: item.date || selectedDate,
-          });
-        }
-      }
-      if (!newLines.length) {
-        toast.info("В расписании нет записей для подбора");
-        return;
-      }
-      saveMutation.mutate([...lines, ...newLines]);
-      toast.success(`Добавлено строк: ${newLines.length}`);
-    } catch {
-      toast.error("Не удалось загрузить расписание");
-    }
-  };
-
   const handleExcelImport = async (file: File) => {
+    if (busy || hasChanges || !selectedDate) return;
+    setImporting(true);
     try {
       const rows = await readExcelRows(file);
       const toTime = (s: string) => {
@@ -369,16 +348,21 @@ function OrderPage() {
             id: Date.now() + i,
             section: activeTab,
             brand,
-            regNumber: pickString(row, "Гос. номер", "Госномер", "Номер"),
+            regNumber: pickString(row, "Государственный регистрационный знак", "Гос. номер", "Госномер", "Номер"),
             usageGroup: pickString(row, "Группа", "Группа эксплуатации"),
             driver: pickString(row, "Водитель", "Ответственный", "Преподаватель"),
-            route: pickString(row, "Маршрут"),
+            route: trainingRoute(pickString(row, "Маршрут движения", "Маршрут")),
             purpose,
             departureTime: toTime(pickString(row, "Время выезда", "Время начала", "Начало")),
             returnTime: toTime(pickString(row, "Время возвращения", "Время окончания", "Конец")),
-            responsible: pickString(row, "Ответственный"),
+            responsible: pickString(row, "В чьё распоряжение", "В чье распоряжение", "Ответственный"),
             note: pickString(row, "Примечание", "Примечания"),
-            date: pickString(row, "Дата") || selectedDate,
+            date: (() => {
+              const value = pickString(row, "Дата").trim();
+              if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+              const local = value.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+              return local ? `${local[3]}-${local[2]}-${local[1]}` : selectedDate;
+            })(),
           };
         })
         .filter((x): x is OrderLine => x !== null);
@@ -386,27 +370,71 @@ function OrderPage() {
         toast.error("В файле не найдено строк");
         return;
       }
-      saveMutation.mutate([...lines, ...imported]);
-      toast.success(`Импортировано строк: ${imported.length}`);
+      const key = (line: OrderLine) => JSON.stringify([
+        line.section, line.date, line.regNumber.trim().toUpperCase().replace(/\s/g, ""),
+        line.purpose.trim(), line.departureTime, line.returnTime,
+        line.regNumber ? "" : line.brand.trim(),
+      ]);
+      const updated = [...lines];
+      const index = new Map(lines.map((line, position) => [key(line), position] as const));
+      let nextId = lines.reduce((max, line) => Math.max(max, line.id), Date.now()) + 1;
+      for (const row of imported) {
+        const signature = key(row);
+        const position = index.get(signature);
+        if (position === undefined) {
+          index.set(signature, updated.length);
+          updated.push({ ...row, id: nextId++ });
+        } else {
+          updated[position] = { ...updated[position], ...row, id: updated[position].id };
+        }
+      }
+      await saveMutation.mutateAsync(updated);
     } catch {
-      toast.error("Не удалось прочитать файл Excel");
+      toast.error("Не удалось импортировать Excel");
+    } finally {
+      setImporting(false);
     }
   };
 
-  if (training) return (
+  const heading = orderTabs.find(tab => tab.key === activeTab)?.label ?? "Наряд";
+  const fields = ["regNumber", "usageGroup", "purpose", "route", "responsible",
+    "departureTime", "returnTime", duty ? "date" : "note"] as const;
+  const headings = duty
+    ? ["ТС", "Гос. номер", "Группа", "Назначение", "Маршрут", "Ответственный",
+        "Время выезда", "Время возвращения", "Дата"]
+    : ["Марка машины", "Государственный регистрационный знак", "Группа эксплуатации",
+        "Для каких целей назначается машина", "Маршрут движения", "В чьё распоряжение",
+        "Время выезда", "Время возвращения", "Примечание"];
+  const widths = training ? [36, 249, 162, 144, 250, 169, 144, 144, 144, 140]
+    : duty ? [36, 320, 148, 148, 148, 148, 148, 135, 135, 135]
+      : [36, 235, 159, 142, 186, 160, 160, 143, 143, 135];
+
+  return (
     <div>
-      <PageHeader title="Учебные средства"
-        subtitle={`Строк в разделе: ${filteredLines.length}. Автоподбор по расписанию ОУП.`}
+      <PageHeader title={heading}
+        subtitle={`Строк в разделе: ${filteredLines.length}${training ? ". Автоподбор по расписанию ОУП." : ""}`}
         actions={<>
           <label className="flex items-center gap-2 text-sm">
             Дата
-            <Input type="date" className="w-[132px]" disabled={busy} value={selectedDate}
+            <Input type="date" className="w-[132px]" disabled={busy || hasChanges} value={selectedDate}
               onChange={event => { setSelectedRows(new Set()); setSelectedDate(event.target.value); }} />
           </label>
-          <Button variant="outline" disabled={busy || !selectedDate} onClick={handleTrainingAutopick}>
-            {picking ? "Заполнение…" : "Автозаполнение"}
-          </Button>
-          <Button disabled={busy || !selectedRows.size} onClick={transferTraining}>
+          {!duty && <Button variant="outline" disabled={busy || hasChanges || !selectedDate} onClick={handleAutopick}>
+            {picking ? "Заполнение…" : activeTab === "household" ? "Подбор по расписанию" : "Автозаполнение"}
+          </Button>}
+          {!training && <>
+            <Button variant="outline" disabled={busy || hasChanges || !selectedDate}
+              onClick={() => document.getElementById("order-excel-upload")?.click()}>
+              {importing ? "Импорт…" : "Импорт Excel"}
+            </Button>
+            <input id="order-excel-upload" type="file" accept=".xlsx,.xls" className="hidden"
+              onChange={event => {
+                const file = event.target.files?.[0];
+                if (file) void handleExcelImport(file);
+                event.target.value = "";
+              }} />
+          </>}
+          <Button disabled={busy || hasChanges || !selectedDate || !selectedRows.size} onClick={transferRows}>
             Перенести в «Наряд»
           </Button>
         </>}
@@ -414,8 +442,8 @@ function OrderPage() {
       <Panel className="overflow-x-auto rounded-lg border-[#e2e2e2]">
         <table className="w-full min-w-[1200px] table-fixed border-collapse text-[13px] leading-5">
           <colgroup>
-            {[36, 249, 162, 144, 250, 169, 144, 144, 144, 140].map((width, index) => (
-              <col key={index} style={{ width: `${width / 15.82}%` }} />
+            {widths.map((width, index) => (
+              <col key={index} style={{ width: `${100 * width / widths.reduce((sum, value) => sum + value, 0)}%` }} />
             ))}
           </colgroup>
           <thead className="bg-[#f7f7f7] text-[12px] leading-4 text-neutral-500">
@@ -424,39 +452,57 @@ function OrderPage() {
                 <input className="align-middle" type="checkbox" aria-label="Выбрать все"
                   checked={allSelected} disabled={!filteredLines.length || busy} onChange={toggleAllRows} />
               </th>
-              {["Марка машины", "Государственный регистрационный знак", "Группа эксплуатации",
-                "Для каких целей назначается машина", "Маршрут движения", "В чьё распоряжение",
-                "Время выезда", "Время возвращения", "Примечание"].map(label => (
+              {headings.map(label => (
                 <th key={label} scope="col" className="px-2 py-4 text-left align-middle font-normal">{label}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {filteredLines.map(line => (
-              <tr key={line.id} className={cn("border-t border-[#f0f0f0]", selectedRows.has(line.id) && "bg-accent")}>
-                <td className="px-2 py-3 text-center align-middle">
-                  <input className="align-middle" type="checkbox" aria-label={`Выбрать строку ${line.id}`}
-                    checked={selectedRows.has(line.id)} disabled={busy} onChange={() => toggleRowSelection(line.id)} />
-                </td>
-                <td className="px-2 py-3 align-middle">
-                  <select aria-label="Марка машины" disabled={busy}
-                    className="h-[38px] w-full rounded-md border border-input bg-background px-2 text-[13px]"
-                    value={trainingVehicles.some(vehicle => vehicle.plate === line.regNumber) ? line.regNumber : ""}
-                    onChange={event => changeTrainingVehicle(line, event.target.value)}>
-                    <option value="">{line.brand ? `Подбор: ${line.brand}` : "Выберите машину"}</option>
-                    {trainingVehicles.map(vehicle => (
-                      <option key={vehicle.id} value={vehicle.plate}>
-                        {vehicle.brand} · {vehicle.plate} · {vehicle.group}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-                {[line.regNumber, line.usageGroup, line.purpose, line.route,
-                  line.responsible || line.driver, line.departureTime, line.returnTime, line.note || today].map((value, i) => (
-                  <td key={i} className="whitespace-pre-wrap break-words px-2 py-3 align-middle">{value}</td>
-                ))}
-              </tr>
-            ))}
+            {filteredLines.map(line => {
+              const inFleet = allowedVehicles.some(vehicle => vehicle.plate === line.regNumber);
+              const cell = cn("px-2 align-middle", training ? "py-3" : "py-1");
+              return (
+                <tr key={line.id} className={cn("border-t border-[#f0f0f0]", selectedRows.has(line.id) && "bg-accent")}>
+                  <td className={cn(cell, "text-center")}>
+                    <input className="align-middle" type="checkbox" aria-label={`Выбрать строку ${line.id}`}
+                      checked={selectedRows.has(line.id)} disabled={busy} onChange={() => toggleRowSelection(line.id)} />
+                  </td>
+                  <td className={cell}>
+                    <select aria-label="Марка машины" disabled={busy}
+                      className="h-[38px] w-full rounded-md border border-input bg-background px-2 text-[13px]"
+                      value={inFleet ? line.regNumber : ""}
+                      onChange={event => changeVehicle(line, event.target.value)}>
+                      <option value="">{duty ? "Своя марка / вне списка" : line.brand ? `Подбор: ${line.brand}` : "Выберите машину"}</option>
+                      {allowedVehicles.map(vehicle => (
+                        <option key={vehicle.id} value={vehicle.plate}>
+                          {vehicle.brand} · {vehicle.plate} · {vehicle.group}
+                        </option>
+                      ))}
+                    </select>
+                    {duty && !inFleet && <Input className="mt-1 h-[38px]" aria-label="Своя марка"
+                      disabled={busy} value={line.brand} onChange={event => editLine(line.id, { brand: event.target.value })} />}
+                  </td>
+                  {fields.map((field, index) => {
+                    const value = field === "responsible" ? line.responsible || line.driver
+                      : field === "note" && training ? line.note || today
+                        : line[field] ?? "";
+                    const time = field === "departureTime" || field === "returnTime";
+                    const editable = !training && field !== "date" &&
+                      ((field !== "regNumber" && field !== "usageGroup") || (duty && !inFleet));
+                    return (
+                      <td key={field} className={cn(cell, "whitespace-pre-wrap break-words")}>
+                        {editable ? <Input aria-label={headings[index + 1]} type={time ? "time" : "text"}
+                          className="h-9 border-transparent bg-transparent px-1 shadow-none hover:border-input focus:border-input"
+                          disabled={busy} value={value} onChange={event => editLine(line.id, field === "responsible"
+                            ? { responsible: event.target.value, driver: event.target.value }
+                            : { [field]: event.target.value })} />
+                          : field === "date" ? (value || selectedDate).split("-").reverse().join(".") : value}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
             {!filteredLines.length && (
               <tr><td colSpan={10} className="py-12 text-center text-sm text-neutral-500">
                 {isLoading ? "Загрузка…" : "На выбранную дату строк нет"}
@@ -465,174 +511,17 @@ function OrderPage() {
           </tbody>
         </table>
       </Panel>
-    </div>
-  );
 
-  return (
-    <div>
-      <PageHeader
-        title={orderTabs.find(tab => tab.key === activeTab)?.label ?? "Наряд"}
-        subtitle={`Строк в разделе: ${filteredLines.length}`}
-        actions={
-          <>
-            <label className="flex items-center gap-2 text-sm">Дата<Input type="date" className="w-36" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} /></label>
-            <Button variant="outline" onClick={handleOtherAutopick}>
-              <FileText className="mr-2 h-4 w-4" />
-              Подбор по расписанию
-            </Button>
-            <Button variant="outline" onClick={() => document.getElementById("excel-upload")?.click()}>
-              <Download className="mr-2 h-4 w-4" />
-              Импорт Excel
-            </Button>
-            <input
-              id="excel-upload"
-              type="file"
-              accept=".xlsx,.xls"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleExcelImport(file);
-                e.target.value = "";
-              }}
-            />
-          </>
-        }
-      />
-
-      <Panel className="thin-scroll max-h-[calc(100vh-12rem)] overflow-auto">
-        <table className="w-full border-collapse text-sm">
-          <thead className="sticky top-0 z-10 bg-neutral-50 text-xs text-neutral-500 [&_th]:font-normal">
-            <tr className="border-b border-border">
-              <th className="w-12 px-3 py-3">
-                <input
-                  type="checkbox"
-                  aria-label="Выбрать все"
-                  checked={allSelected}
-                  onChange={toggleAllRows}
-                />
-              </th>
-              <th className="px-3 py-3 text-left">ТС</th>
-              <th className="px-3 py-3 text-left">Гос. номер</th>
-              <th className="px-3 py-3 text-left">Группа</th>
-              <th className="px-3 py-3 text-left">Назначение</th>
-              <th className="px-3 py-3 text-left">Маршрут</th>
-              <th className="px-3 py-3 text-left">Ответственный</th>
-              <th className="px-3 py-3 text-left">Время выезда</th>
-              <th className="px-3 py-3 text-left">Время возвращения</th>
-              <th className="px-3 py-3 text-left">Дата</th>
-              <th className="px-3 py-3 text-left">Примечание</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredLines.length === 0 ? (
-              <tr>
-                <td colSpan={10} className="py-20 text-center text-muted-foreground">
-                  В этом разделе записей нет
-                </td>
-              </tr>
-            ) : (
-              filteredLines.map((line) => (
-                <tr key={line.id} className={cn("border-b border-border", selectedRows.has(line.id) && "bg-accent")}>
-                  <td className="px-3 py-3 text-center">
-                    <input
-                      type="checkbox"
-                      checked={selectedRows.has(line.id)}
-                      onChange={() => toggleRowSelection(line.id)}
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.brand}
-                      onChange={(e) => handleCellEdit(line.id, "brand", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.regNumber}
-                      onChange={(e) => handleCellEdit(line.id, "regNumber", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.usageGroup}
-                      onChange={(e) => handleCellEdit(line.id, "usageGroup", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.purpose}
-                      onChange={(e) => handleCellEdit(line.id, "purpose", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.route}
-                      onChange={(e) => handleCellEdit(line.id, "route", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.responsible}
-                      onChange={(e) => handleCellEdit(line.id, "responsible", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      type="time"
-                      value={line.departureTime}
-                      onChange={(e) => handleCellEdit(line.id, "departureTime", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      type="time"
-                      value={line.returnTime}
-                      onChange={(e) => handleCellEdit(line.id, "returnTime", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      type="date"
-                      value={line.date || ""}
-                      onChange={(e) => handleCellEdit(line.id, "date", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                  <td className="px-3 py-3">
-                    <Input
-                      value={line.note}
-                      onChange={(e) => handleCellEdit(line.id, "note", e.target.value)}
-                      className="h-8"
-                    />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </Panel>
-
-      <Panel className="mt-4 flex gap-2 p-3">
-        <Button variant="danger" onClick={handleDeleteSelected} disabled={selectedRows.size === 0}>
-          <Trash2 className="mr-2 h-4 w-4" />
+      {!training && <div className="mt-4 flex flex-wrap gap-2">
+        <Button variant="danger" disabled={busy || hasChanges || !selectedRows.size} onClick={handleDeleteSelected}>
           Удалить выбранные ({selectedRows.size})
         </Button>
-        <Button onClick={handleAddRow}>
-          <Plus className="mr-2 h-4 w-4" />
+        <Button variant="outline" disabled={busy || hasChanges || !selectedDate} onClick={handleAddRow}>
           Добавить строку
         </Button>
-        <Button variant="outline" disabled={true}>
-          Сохранить изменения
-        </Button>
-      </Panel>
+        <Button disabled={busy || !hasChanges} onClick={saveChanges}>Сохранить изменения</Button>
+        {hasChanges && <Button variant="outline" disabled={busy} onClick={() => setChanges({})}>Отмена</Button>}
+      </div>}
 
       <Modal
         open={deleteOpen}
