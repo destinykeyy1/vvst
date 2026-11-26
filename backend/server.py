@@ -857,7 +857,12 @@ def _condition_duration(months):
     if months is None:
         return ''
     years, rest = divmod(abs(months), 12)
-    text = ' '.join(part for part in (f'{years} г.' if years else '', f'{rest} мес.' if rest or not years else '') if part)
+    if years % 100 in range(11, 15):
+        year_word = 'лет'
+    else:
+        year_word = {1: 'год', 2: 'года', 3: 'года', 4: 'года'}.get(years % 10, 'лет')
+    text = ' '.join(part for part in (f'{years} {year_word}' if years else '',
+                                      f'{rest} мес.' if rest or not years else '') if part)
     return ('−' if months < 0 else '') + text
 
 
@@ -915,7 +920,7 @@ def _condition_performance(data, item, act_date):
 
     repair_start = _condition_number(field('Показания спидометра при последнем ремонте'))
     return [
-        commissioned.strftime('%d.%m.%Y') if commissioned else '',
+        commissioned.strftime('%d.%m.%Y г.') if commissioned else '',
         _condition_duration(elapsed), _condition_km(worked), _condition_km(resource),
         _condition_duration(term), _condition_km(warranty_km), '15 лет',
         ', '.join(part for part in (repair_name, repair_date.strftime('%d.%m.%Y') if repair_date else '') if part)
@@ -934,6 +939,9 @@ def _document_word_export(kind, template, body, vehicles, details):
     rows = list(table.rows[first:])
     items = body['rows']
     is_writeoff = kind.endswith('-writeoff')
+    is_tarp = kind.startswith('tarp-')
+    from_inventory = body.get('source') == 'inventory'
+    fill_inventory = is_tarp or from_inventory
     number = _document_text(body.get('number'))
     stamp = ''
     if 'date' in body:
@@ -943,7 +951,8 @@ def _document_word_export(kind, template, body, vehicles, details):
         if re.match(r'^\s*АКТ\s*№\s*_+', paragraph.text):
             paragraph.text = f'АКТ № {number or "________"}'
     metadata = doc.tables[0 if kind == 'condition' else 1]
-    for row in metadata.rows:
+    date_rows = metadata.rows[2:3] if kind == 'condition' else metadata.rows
+    for row in date_rows:
         cells = _document_unique_cells(row)
         if any(_document_key(cell.text) in ('дата', 'датапоокпо') for cell in cells[:-1]):
             _document_set_cells(cells[-1:], [stamp])
@@ -964,7 +973,8 @@ def _document_word_export(kind, template, body, vehicles, details):
         act_date = date.fromisoformat(body['date']) if stamp else date.today()
         field = data['field']
         performance = _condition_performance(data, item, act_date)
-        _document_set_cells(_document_unique_cells(doc.tables[2].rows[3]), performance)
+        _document_set_cells(_document_unique_cells(doc.tables[2].rows[3]),
+                            [value if _document_text(value).strip() else '—' for value in performance])
         entries = [{**item, 'material': data['brand'], 'factoryNumber': data['factoryNumber'],
                     'passportNumber': data['passportNumber'], 'manufacturer': data['manufacturer'],
                     'code': field('Код по КВТ МО') or item.get('code'),
@@ -1006,7 +1016,7 @@ def _document_word_export(kind, template, body, vehicles, details):
         for row in rows:
             table._tbl.remove(row._tr)
         for index, entry in enumerate(entries, 1):
-            _document_add_row(table, rows[0], [index, *(entry.get(key) for key in CONDITION_FIELDS)])
+            _document_add_row(table, rows[0], [f'{index}.', *(entry.get(key) for key in CONDITION_FIELDS)])
     else:
         group, material = next((r for r in rows if len(_document_unique_cells(r)) == (1 if is_writeoff else 2)), None), next(
             (r for r in rows if len(_document_unique_cells(r)) == (10 if is_writeoff else 11)), None)
@@ -1016,31 +1026,58 @@ def _document_word_export(kind, template, body, vehicles, details):
         for row in rows:
             table._tbl.remove(row._tr)
         quantity_sum = amount_sum = Decimal(0)
+        incomplete_amount = False
+        incomplete_quantity = False
         for index, item in enumerate(items, 1):
             vehicle, card = _document_find_vehicle(item, vehicles, details)
             values = _document_material(kind, item, card)
             label = _document_vehicle_label(_document_vehicle_values(vehicle, card))
+            if fill_inventory:
+                captions = (
+                    ('Дата установки', 'installed'),
+                    ('Норма наработки, км' if kind.startswith('tire-') else 'Срок службы по норме', 'norm'),
+                    ('Фактический пробег, км' if kind.startswith('tire-') else 'Фактический срок службы', 'actual'),
+                )
+                if values.get('manufactured'):
+                    captions = (('Дата изготовления', 'manufactured'), *captions)
+                for caption, key in captions:
+                    label += f"\n{caption}: {_document_text(values.get(key)).strip() or '—'}"
+                if is_writeoff and _document_text(values.get('reason')).strip() not in ('', '—'):
+                    label += f"\nОснование: {_document_text(values['reason'])}"
             _document_add_row(table, group, [label] if is_writeoff else [index, label])
             if is_writeoff:
-                quantity = _document_decimal(values.get('quantity'), 'Количество')
-                price = _document_decimal(values.get('price'), 'Цена')
-                amount = (quantity * price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                quantity_sum += quantity
-                amount_sum += amount
-                values['amount'] = f'{amount:.2f}'.replace('.', ',')
+                quantity = None
+                if from_inventory and not _document_text(values.get('quantity')).strip():
+                    incomplete_quantity = True
+                else:
+                    quantity = _document_decimal(values.get('quantity'), 'Количество')
+                    quantity_sum += quantity
+                if quantity is None or (fill_inventory and not _document_text(values.get('price')).strip()):
+                    incomplete_amount = True
+                    values['amount'] = '—'
+                else:
+                    price = _document_decimal(values.get('price'), 'Цена')
+                    amount = (quantity * price).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                    amount_sum += amount
+                    values['amount'] = f'{amount:.2f}'.replace('.', ',')
+                if from_inventory and kind.startswith('tire-'):
+                    values['norm'] = '—'
                 values.setdefault('direction', 'Списание')
                 output = [values.get(key) for key in WRITEOFF_FIELDS]
             else:
                 output = [index, *(values.get(key) for key in CHANGE_FIELDS)]
+            if fill_inventory:
+                output = [value if _document_text(value).strip() else '—' for value in output]
             _document_add_row(table, material, output)
         notes = body.get('notes', {})
         if not isinstance(notes, dict):
             raise ValidationError('Примечания к акту должны быть объектом')
+        amount_text = '—' if incomplete_amount else f'{amount_sum:.2f}'.replace('.', ',')
         approval_index = DOCUMENT_APPROVAL_PARAGRAPHS.get(kind)
         for index, paragraph in enumerate(doc.paragraphs):
             text = paragraph.text.strip()
             if text.startswith('Всего по настоящему акту списано'):
-                paragraph.text = f'Всего по настоящему акту списано материалов на общую сумму: {amount_sum:.2f} руб.'.replace('.', ',', 1)
+                paragraph.text = f'Всего по настоящему акту списано материалов на общую сумму: {amount_text} руб.'
             elif text.startswith('Заключение комиссии:'):
                 paragraph.text = f"Заключение комиссии: {_document_text(notes.get('conclusion'))}"
             elif text.startswith('В результате выбытия'):
@@ -1052,8 +1089,9 @@ def _document_word_export(kind, template, body, vehicles, details):
             elif index == approval_index:
                 paragraph.text = _document_text(notes.get('approval'))
         if is_writeoff and total is not None:
-            _document_add_row(table, total, ['Итого', format(quantity_sum.normalize(), 'f'),
-                                             f'{amount_sum:.2f}'.replace('.', ','), '', ''])
+            quantity_text = '—' if incomplete_quantity else format(quantity_sum.normalize(), 'f')
+            amounts = ['—', amount_text] if from_inventory else [amount_text, amount_text if is_tarp else '']
+            _document_add_row(table, total, ['Итого', quantity_text, *amounts, '—' if fill_inventory else ''])
     stream = BytesIO()
     doc.save(stream)
     return stream.getvalue()
@@ -1972,7 +2010,9 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                     body = json.loads(data)
                 except (ValueError, UnicodeError, RecursionError) as exc:
                     raise ValidationError('Некорректный JSON') from exc
-                _exact_fields(body, {'rows'}, {'number', 'date', 'notes'})
+                _exact_fields(body, {'rows'}, {'number', 'date', 'notes', 'source'})
+                if 'source' in body:
+                    _choice(body['source'], {'inventory'}, 'Источник документа')
                 rows = body['rows']
                 if not isinstance(rows, list) or not 1 <= len(rows) <= 300 or not all(
                         isinstance(item, dict) for item in rows):

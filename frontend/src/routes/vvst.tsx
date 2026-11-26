@@ -294,6 +294,11 @@ function VvstPage() {
   const exportAct = async () => {
     if (selected.size !== 1) return;
     const [vehicleId] = selected;
+    const vehicle = vehicles.find(({ id }) => id === vehicleId);
+    if (!vehicle) {
+      toast.error("Машина не найдена в перечне ВВСТ");
+      return;
+    }
     try {
       const response = await fetch("/api/documents/condition/export", {
         method: "POST",
@@ -310,7 +315,10 @@ function VvstPage() {
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = "Акт_технического_состояния.docx";
+      const name = [vehicle.brand, vehicle.plate].map((part) =>
+        part.trim().replace(/[<>:"/\\|?*]/g, "-").replace(/ +/g, "_"),
+      ).filter(Boolean).join("_");
+      link.download = `Акт_технического_состояния_${name || vehicleId}.docx`;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {

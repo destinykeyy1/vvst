@@ -59,7 +59,8 @@ const PC = {
 
 function pv(vehicle: Vehicle, column: number): string {
   const item = vehicle.passportExtra?.find((p) => p.column === column);
-  return item ? String(item.value ?? "").trim() : "";
+  const text = String(item?.value ?? "").trim();
+  return /^[-–—]+$/.test(text) ? "" : text;
 }
 
 function toInt(v: string): number {
@@ -82,13 +83,24 @@ function parseDate(v: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function yearsSince(dateStr: string, now: Date): number | null {
-  const d = parseDate(dateStr);
-  if (!d) return null;
-  let years = now.getFullYear() - d.getFullYear();
-  const before = now.getMonth() < d.getMonth() || (now.getMonth() === d.getMonth() && now.getDate() < d.getDate());
-  if (before) years -= 1;
-  return Math.max(0, years);
+function serviceMonths(installed: string, now: Date) {
+  const monthYear = installed.match(/^(0?[1-9]|1[0-2])[./](\d{4})(?:\s*г\.?)?$/);
+  const installedDate = monthYear
+    ? new Date(Number(monthYear[2]), Number(monthYear[1]) - 1, 1)
+    : /^\d{4}$/.test(installed) ? null : parseDate(installed);
+  const months = installedDate
+    ? Math.max(0, (now.getFullYear() - installedDate.getFullYear()) * 12
+      + now.getMonth() - installedDate.getMonth() - Number(now.getDate() < installedDate.getDate()))
+    : null;
+  return months;
+}
+
+function serviceDuration(months: number | null) {
+  const years = months === null ? null : Math.floor(months / 12);
+  return months === null || years === null ? "—" : [
+    years > 0 ? fmtYears(years) : "",
+    months % 12 || years === 0 ? `${months % 12} мес.` : "",
+  ].filter(Boolean).join(" ");
 }
 
 function fmtYears(years: number): string {
@@ -96,11 +108,11 @@ function fmtYears(years: number): string {
 }
 
 function normYears(text: string, fallback: number): number {
-  const n = toInt(text);
+  const n = toInt(text.match(/^(\d+)\s*(?:год(?:а|ов)?|лет)$/i)?.[1] ?? text);
   return n > 0 && n < 100 ? n : fallback;
 }
 
-function lifeStatus(actual: number | null, norm: number, writtenOff: string, now: Date): { actual: string; norm: string; remaining: string; status: WriteOffItem["status"]; reason: string } {
+function lifeStatus(actual: number | null, norm: number, writtenOff: string): { actual: string; norm: string; remaining: string; status: WriteOffItem["status"]; reason: string } {
   if (writtenOff) {
     return { actual: actual === null ? "—" : fmtYears(actual), norm: fmtYears(norm), remaining: "списано", status: "expired", reason: writtenOff };
   }
@@ -118,13 +130,16 @@ function lifeStatus(actual: number | null, norm: number, writtenOff: string, now
 }
 
 interface WriteOffItem {
-  id: number;
+  id: string;
+  sourceVehicleId: Vehicle["id"];
   vehicle: string;
   vehiclePlate: string;
   vehicleId: string;
   item: string;
   itemDetail?: string;
-  quantity: number;
+  quantity?: number;
+  exportKind: "battery" | "tire" | "tshz" | "tshl" | "tarp";
+  manufactured?: string;
   numbers?: string;
   installDate: string;
   serviceLife: string;
@@ -223,9 +238,9 @@ const PAGE_CONFIG: Record<WriteOffKind, { subtitle: string; exportLabel1: string
 function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
   const now = new Date();
   const items: WriteOffItem[] = [];
-  let id = 1;
 
   const base = (v: Vehicle) => ({
+    sourceVehicleId: v.id,
     vehicle: v.brand,
     vehiclePlate: v.plate,
     vehicleId: pv(v, PC.factoryNumber) || pv(v, PC.vin),
@@ -238,21 +253,24 @@ function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
         const brand = pv(v, p);
         const written = pv(v, suffix === "" ? PC.akbWritten : PC.akb2Written);
         const installed = pv(v, suffix === "" ? PC.akbInstalled : PC.akb2Installed);
-        if (!brand && !written) continue;
+        if (!brand && !installed && !written) continue;
         const life = normYears(pv(v, (suffix === "" ? PC.akbLife : PC.akb2Life) as number), 0);
-        const actualYears = yearsSince(installed, now);
-        const lifeInfo = life > 0 ? lifeStatus(actualYears, life, written, now) : { actual: "—", norm: pv(v, (suffix === "" ? PC.akbLife : PC.akb2Life) as number) || "—", remaining: "—", status: written ? ("expired" as const) : ("ok" as const), reason: written || "—" };
+        const months = serviceMonths(installed, now);
+        const actualYears = months === null ? null : Math.floor(months / 12);
+        const lifeInfo = life > 0 ? lifeStatus(actualYears, life, written) : { actual: "—", norm: pv(v, (suffix === "" ? PC.akbLife : PC.akb2Life) as number) || "—", remaining: "—", status: written ? ("expired" as const) : ("ok" as const), reason: written || "—" };
         items.push({
           ...base(v),
-          id: id++,
+          id: `${v.id}:battery:${p}`,
+          exportKind: "battery",
           item: brand || "АКБ",
           itemDetail: detail,
-          quantity: toInt(pv(v, (suffix === "" ? PC.akbQty : PC.akb2Qty) as number)) || 1,
-          numbers: pv(v, (suffix === "" ? PC.akbNumber : PC.akb2Number) as number) || pv(v, (suffix === "" ? PC.akbMaker : PC.akb2Maker) as number),
-          installDate: installed || pv(v, (suffix === "" ? PC.akbMade : PC.akb2Made) as number),
+          quantity: toInt(pv(v, (suffix === "" ? PC.akbQty : PC.akb2Qty) as number)) || undefined,
+          numbers: pv(v, suffix === "" ? PC.akbNumber : PC.akb2Number),
+          installDate: installed,
+          manufactured: pv(v, suffix === "" ? PC.akbMade : PC.akb2Made),
           serviceLife: lifeInfo.norm,
           norm: lifeInfo.norm,
-          actual: lifeInfo.actual,
+          actual: serviceDuration(months),
           remaining: lifeInfo.remaining,
           status: lifeInfo.status,
           reason: lifeInfo.reason,
@@ -264,23 +282,26 @@ function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
         const spec = pv(v, p);
         const written = pv(v, suffix === "" ? PC.tireWritten : PC.tire2Written);
         if (!spec && !written) continue;
-        const installKm = toInt(pv(v, (suffix === "" ? PC.tireOdometer : PC.tire2Odometer) as number));
+        const installKmText = pv(v, suffix === "" ? PC.tireOdometer : PC.tire2Odometer);
+        const installKm = Number(installKmText.replace(/\s/g, "").replace(",", "."));
         const normKm = toInt(pv(v, (suffix === "" ? PC.tireNorm : PC.tire2Norm) as number));
         const fileRemaining = pv(v, (suffix === "" ? PC.tireRemaining : PC.tire2Remaining) as number);
-        const actualKm = installKm > 0 ? Math.max(0, v.mileage - installKm) : 0;
-        const remainingKm = toInt(fileRemaining) || (normKm > 0 ? normKm - actualKm : 0);
+        const actualKm = installKmText && Number.isFinite(installKm) && installKm >= 0
+          ? Math.max(0, v.mileage - installKm) : null;
+        const remainingKm = fileRemaining ? toInt(fileRemaining) : normKm > 0 && actualKm !== null ? normKm - actualKm : 0;
         const status: WriteOffItem["status"] = written || remainingKm < 0 ? "expired" : remainingKm < normKm * 0.2 ? "warning" : "ok";
         items.push({
           ...base(v),
-          id: id++,
+          id: `${v.id}:tire:${p}`,
+          exportKind: "tire",
           item: spec || "Шины",
           itemDetail: detail,
-          quantity: toInt(pv(v, (suffix === "" ? PC.tireQty : PC.tire2Qty) as number)) || 1,
+          quantity: toInt(pv(v, (suffix === "" ? PC.tireQty : PC.tire2Qty) as number)) || undefined,
           numbers: pv(v, (suffix === "" ? PC.tireNumbers : PC.tire2Numbers) as number),
           installDate: pv(v, (suffix === "" ? PC.tireInstalled : PC.tire2Installed) as number),
           serviceLife: normKm ? `${normKm.toLocaleString("ru-RU")} км` : "—",
           norm: normKm ? normKm.toLocaleString("ru-RU") : "—",
-          actual: actualKm ? actualKm.toLocaleString("ru-RU") : "—",
+          actual: actualKm?.toLocaleString("ru-RU") ?? "—",
           remaining: written ? "списано" : remainingKm < 0 ? `просрочено на ${Math.abs(remainingKm).toLocaleString("ru-RU")} км` : remainingKm.toLocaleString("ru-RU"),
           status,
           reason: written || (remainingKm < 0 ? `Пробег превышен (${(normKm + Math.abs(remainingKm)).toLocaleString("ru-RU")} км)` : status === "warning" ? "Остаток ресурса менее 20%" : "—"),
@@ -293,19 +314,21 @@ function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
       ] as const) {
         const installed = pv(v, installedCol);
         const written = pv(v, writtenCol);
-        if (!installed && !written) continue;
-        const fileLife = normYears(pv(v, lifeCol), norm);
-        const actualYears = yearsSince(installed, now);
-        const info = lifeStatus(actualYears, fileLife, written, now);
+        const life = pv(v, lifeCol);
+        if (!installed && !written && !life) continue;
+        const fileLife = normYears(life, norm);
+        const months = serviceMonths(installed, now);
+        const actualYears = months === null ? null : Math.floor(months / 12);
+        const info = lifeStatus(actualYears, fileLife, written);
         items.push({
           ...base(v),
-          id: id++,
+          id: `${v.id}:${installedCol}`,
+          exportKind: name === "ТШ-З" ? "tshz" : "tshl",
           item: name,
-          quantity: 1,
           installDate: installed,
           serviceLife: info.norm,
           norm: info.norm,
-          actual: info.actual,
+          actual: serviceDuration(months),
           remaining: info.remaining,
           status: info.status,
           reason: info.reason,
@@ -318,19 +341,23 @@ function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
       ] as const) {
         const installed = pv(v, installedCol);
         const written = pv(v, writtenCol);
-        if (!installed && !written) continue;
-        const fileLife = normYears(pv(v, lifeCol), fallback);
-        const actualYears = yearsSince(installed, now);
-        const info = lifeStatus(actualYears, fileLife, written, now);
+        const life = pv(v, lifeCol);
+        if (!installed && !written && !life) continue;
+        const fileLife = normYears(life, fallback);
+        const months = serviceMonths(installed, now);
+        const actualYears = months === null ? null : Math.floor(months / 12);
+        const info = lifeStatus(actualYears, fileLife, written);
+        const actual = serviceDuration(months);
         items.push({
           ...base(v),
-          id: id++,
+          id: `${v.id}:${name}`,
+          exportKind: "tarp",
           item: name,
           quantity: 1,
           installDate: installed,
           serviceLife: info.norm,
           norm: info.norm,
-          actual: info.actual,
+          actual,
           remaining: info.remaining,
           status: info.status,
           reason: info.reason,
@@ -341,12 +368,18 @@ function buildItems(kind: WriteOffKind, vehicles: Vehicle[]): WriteOffItem[] {
   return items;
 }
 
+interface WriteOffPageProps {
+  kind: WriteOffKind;
+  title: string;
+  itemLabel: string;
+}
+
 export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
   const config = PAGE_CONFIG[kind];
   const vehicles = useAppState((s) => s.vehicles);
   const data = useMemo(() => buildItems(kind, vehicles), [kind, vehicles]);
   const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<WriteOffItem["id"]>>(new Set());
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 }>({ key: "vehicle", dir: 1 });
 
   const filteredData = useMemo(() => {
@@ -375,7 +408,86 @@ export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
   }, [filteredData, sort]);
 
   const allSelected = sortedData.length > 0 && sortedData.every((item) => selected.has(item.id));
-  const selectedCount = selected.size;
+  const selectedItems = data.filter((item) => selected.has(item.id));
+  const selectedCount = selectedItems.length;
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+
+  async function exportDocuments(action: "change" | "writeoff") {
+    if (exporting || selectedItems.length === 0) return;
+    setExportError("");
+    setExporting(true);
+    try {
+      const groups = new Map<WriteOffItem["exportKind"], WriteOffItem[]>();
+      for (const item of selectedItems) {
+        const group = groups.get(item.exportKind) ?? [];
+        group.push(item);
+        groups.set(item.exportKind, group);
+      }
+      const labels = {
+        battery: "АКБ",
+        tire: "шин",
+        tshz: "зимних шлемофонов",
+        tshl: "летних шлемофонов",
+        tarp: "брезентов",
+      };
+      const today = new Date();
+      const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const documents = [];
+      for (const [group, items] of groups) {
+        const rows = items.map((item) => {
+          const vehicleId = Number(item.sourceVehicleId);
+          if (!Number.isSafeInteger(vehicleId) || vehicleId < 1) {
+            throw new Error(`Некорректный идентификатор машины «${item.vehicle}»`);
+          }
+          const name = item.item === "Брезент" ? "Брезент укрывочный"
+            : group === "battery" && !/^АКБ(?:\s|$)/i.test(item.item) ? `АКБ ${item.item}`
+            : item.item;
+          return {
+            vehicleId,
+            material: [name, item.numbers].filter(Boolean).join("\n"),
+            installed: item.installDate,
+            manufactured: item.manufactured,
+            norm: item.norm,
+            actual: item.actual,
+            quantity: item.quantity,
+            reason: item.reason,
+          };
+        });
+        const response = await fetch(`/api/documents/${group}-${action}/export`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date, rows, source: "inventory" }),
+        });
+        if (!response.ok) {
+          const error = await response.json().catch(() => null);
+          throw new Error(error?.error || `Не удалось сформировать акт (HTTP ${response.status})`);
+        }
+
+        const first = items[0];
+        const moreVehicles = new Set(rows.map((row) => row.vehicleId)).size - 1;
+        const vehicle = [first.vehicle, first.vehiclePlate || first.vehicleId]
+          .filter(Boolean).join(" ").replace(/[<>:"/\\|?*]/g, "_");
+        const title = action === "change" ? "Акт изменения состояния" : "Акт списания";
+        const fileName = `${title} ${labels[group]} - ${vehicle}${moreVehicles ? ` и ещё ${moreVehicles}` : ""}.docx`;
+        documents.push({ fileName, blob: await response.blob() });
+      }
+      for (const { fileName, blob } of documents) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Не удалось скачать акт");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   const toggleSort = (key: string) => setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
 
@@ -386,11 +498,21 @@ export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
         subtitle={config.subtitle}
         actions={
           <>
-            <Button variant="outline" className="text-muted-foreground">
+            <Button
+              variant="outline"
+              className="text-muted-foreground"
+              disabled={!selectedCount || exporting}
+              onClick={() => void exportDocuments("writeoff")}
+            >
               <Download className="mr-2 h-4 w-4" />
               {config.exportLabel1} ({selectedCount})
             </Button>
-            <Button variant="outline" className="border-border">
+            <Button
+              variant="outline"
+              className="border-border"
+              disabled={!selectedCount || exporting}
+              onClick={() => void exportDocuments("change")}
+            >
               <Download className="mr-2 h-4 w-4" />
               {config.exportLabel2} ({selectedCount})
             </Button>
@@ -417,7 +539,10 @@ export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
         })()}
       </div>
 
-      <p className="mb-4 text-xs text-muted-foreground">{config.infoText}</p>
+      <p className="mb-4 text-xs text-muted-foreground">{kind === "tarps"
+        ? "В акт Word попадут только отмеченные позиции."
+        : config.infoText}</p>
+      {exportError && <p role="alert" className="mb-4 text-sm text-destructive">{exportError}</p>}
 
       <Panel className="mb-4 flex flex-wrap gap-2 p-3">
         <Button variant="outline" onClick={() => setSelected(allSelected ? new Set() : new Set(sortedData.map((item) => item.id)))}>
@@ -485,7 +610,7 @@ export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
                 {kind === "akb" || kind === "tires" ? (
                   <>
                     <td className="px-3 py-3">{item.numbers || "—"}</td>
-                    <td className="px-3 py-3">{item.quantity}</td>
+                    <td className="px-3 py-3">{item.quantity ?? "—"}</td>
                     <td className="px-3 py-3">{item.installDate}</td>
                     {kind === "tires" ? (
                       <>
@@ -498,7 +623,7 @@ export function WriteOffPage({ kind, title, itemLabel }: WriteOffPageProps) {
                   </>
                 ) : (
                   <>
-                    <td className="px-3 py-3">{item.quantity}</td>
+                    <td className="px-3 py-3">{item.quantity ?? "—"}</td>
                     <td className="px-3 py-3">{item.installDate}</td>
                     <td className="px-3 py-3">{item.actual}</td>
                     <td className="px-3 py-3">{item.norm}</td>
