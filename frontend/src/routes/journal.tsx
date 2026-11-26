@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button, Field, Input, Modal } from "@/components/ui-kit";
 import { apiGetCollection, apiJournalAction } from "@/lib/api";
-import type { JournalEntry, JournalRow } from "@/lib/types";
+import { setState } from "@/lib/store";
+import { vehicleFromDto } from "@/lib/backendMap";
+import type { JournalEntry, JournalRow, VehicleDto } from "@/lib/types";
 
 export const Route = createFileRoute("/journal")({
   component: JournalPage,
@@ -13,6 +15,51 @@ export const Route = createFileRoute("/journal")({
 type Entry = Omit<JournalRow, "id" | "closedAt">;
 type FormMode = "departure" | "arrival" | "edit";
 type EditorState = { mode: FormMode; row: JournalRow | null; entry: Entry };
+
+type RegistryVehicle = {
+  id: number;
+  brand: string;
+  regNumber: string;
+  location: string;
+  currentMileage: number;
+  passportData?: { header: string; value: unknown }[] | null;
+};
+
+function passportEngineHours(vehicle: RegistryVehicle) {
+  const reading = vehicle.passportData?.find(({ header }) =>
+    header.trim().replace(/\s+/g, " ").toLocaleLowerCase("ru") === "текущие показания моточасов",
+  )?.value;
+
+  if (typeof reading !== "number" && typeof reading !== "string") return null;
+  if (typeof reading === "string" && !reading.trim()) return null;
+  const value = typeof reading === "number"
+    ? reading
+    : Number(reading.trim().replace(/\s+/g, "").replace(",", "."));
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+type RegistryVehicleDetails = {
+  vehicleId: number;
+  certificate: { subdivision?: string } | null;
+};
+
+const formLabel = "block text-xs font-normal uppercase leading-4 text-[#737373]";
+const formSelect =
+  "h-[38px] w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
+const returnDeadlines = ["15:00", "18:00"];
+
+const fieldLabels: Partial<Record<keyof Entry, string>> = {
+  date: "Дата записи",
+  driver: "Фамилия водителя",
+  brand: "Марка машины",
+  departureOdometer: "Показания спидометра при выезде",
+  departureEngineHours: "Показания моточасов при выезде",
+  departureTime: "Время выезда",
+  arrivalDate: "Дата прибытия",
+  arrivalTime: "Время прибытия",
+  arrivalOdometer: "Показания спидометра при возвращении",
+  arrivalEngineHours: "Показания моточасов при возвращении",
+};
 
 type Column = {
   key: keyof Entry;
@@ -132,7 +179,7 @@ const FORM_COLUMNS: Record<FormMode, Column[]> = {
 };
 
 const FORM_TITLES: Record<FormMode, string> = {
-  departure: "Выезд машины",
+  departure: "Добавить строку",
   arrival: "Прибытие / списание машины",
   edit: "Изменить строку",
 };
@@ -216,6 +263,25 @@ function DepartureSummary({ row }: { row: JournalRow }) {
   );
 }
 
+function arrivalValidationError(entry: Entry) {
+  if (entry.arrivalDate && entry.arrivalDate < entry.date) {
+    return "Дата прибытия не может быть раньше даты выезда";
+  }
+  if (entry.arrivalDate === entry.date && entry.departureTime &&
+      entry.arrivalTime && entry.arrivalTime < entry.departureTime) {
+    return "Время прибытия в день выезда не может быть раньше времени выезда";
+  }
+  if (entry.arrivalOdometer != null && entry.departureOdometer != null &&
+      entry.arrivalOdometer < entry.departureOdometer) {
+    return "Показание спидометра при прибытии не может быть меньше показания при выезде";
+  }
+  if (entry.arrivalEngineHours != null && entry.departureEngineHours != null &&
+      entry.arrivalEngineHours < entry.departureEngineHours) {
+    return "Показание моточасов при прибытии не может быть меньше показания при выезде";
+  }
+  return null;
+}
+
 function JournalPage() {
   const [dutyDate, setDutyDate] = useState(localToday);
   const [dutyOfficer, setDutyOfficer] = useState("");
@@ -223,6 +289,12 @@ function JournalPage() {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [deleteRow, setDeleteRow] = useState<JournalRow | null>(null);
   const passwordInput = useRef<HTMLInputElement>(null);
+  const verifiedPassword = useRef<string | undefined>(undefined);
+  const [passwordRequest, setPasswordRequest] = useState<{
+    action: "edit" | "delete";
+    row: JournalRow;
+  } | null>(null);
+  const [checkingPassword, setCheckingPassword] = useState(false);
 
   const queryClient = useQueryClient();
   const { data: journal = [], isPending, isError } = useQuery({
@@ -230,15 +302,65 @@ function JournalPage() {
     queryFn: () => apiGetCollection<JournalEntry>("journal"),
   });
 
+  const showRegistry = editor !== null && editor.mode !== "arrival";
+  const vehiclesQuery = useQuery({
+    queryKey: ["vehicles"],
+    queryFn: () => apiGetCollection<VehicleDto>("vehicles"),
+    refetchOnMount: "always",
+    enabled: showRegistry,
+  });
+  const detailsQuery = useQuery({
+    queryKey: ["journal-vehicle-details"],
+    queryFn: () => apiGetCollection<RegistryVehicleDetails>("vehicle-details"),
+    enabled: showRegistry,
+  });
+
+  const subdivisionById = new Map(
+    (detailsQuery.data ?? []).map(({ vehicleId, certificate }) => [
+      vehicleId,
+      certificate?.subdivision?.trim(),
+    ] as const),
+  );
+  const fleet = (vehiclesQuery.data ?? []).map((vehicle) => ({
+    ...vehicle,
+    subdivision: subdivisionById.get(vehicle.id) || vehicle.location.trim(),
+  }));
+  const subdivisions = [...new Set(
+    [editor?.entry.subdivision, ...fleet.map((vehicle) => vehicle.subdivision)]
+      .filter((value): value is string => Boolean(value)),
+  )].sort((a, b) => a.localeCompare(b, "ru"));
+  const subdivision = editor?.entry.subdivision;
+  const availableVehicles = subdivision
+    ? fleet.filter((vehicle) => vehicle.subdivision === subdivision)
+    : [];
+  const registryLoading = vehiclesQuery.isPending || detailsQuery.isPending;
+  const registryFailed = vehiclesQuery.isError || detailsQuery.isError;
+
   const saveMutation = useMutation({
     mutationFn: saveJournalAction,
-    onSuccess: async (rows) => {
+    onSuccess: async (rows, action) => {
       queryClient.setQueryData(["journal"], rows);
       setSelectedId((id) => (rows.some((row) => row.id === id) ? id : null));
       setEditor(null);
       setDeleteRow(null);
+      verifiedPassword.current = undefined;
       toast.success("Сохранено");
-      await queryClient.invalidateQueries({ queryKey: ["journal"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["journal"] }),
+        queryClient.invalidateQueries({ queryKey: ["exploitation"] }),
+        queryClient.invalidateQueries({ queryKey: ["vehicles"] }),
+      ]);
+      if (action.action === "return" || action.action === "edit") {
+        try {
+          const fleet = await queryClient.fetchQuery({
+            queryKey: ["vehicles"],
+            queryFn: () => apiGetCollection<VehicleDto>("vehicles"),
+          });
+          setState(state => ({ ...state, vehicles: fleet.map(vehicleFromDto) }));
+        } catch {
+          toast.error("Запись сохранена. Не удалось обновить перечень ВВСТ.");
+        }
+      }
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Ошибка сохранения"),
@@ -247,10 +369,13 @@ function JournalPage() {
   const selected = journal.find((row) => row.id === selectedId);
   const busy = isPending || isError || saveMutation.isPending;
   const rows = [...journal].sort((a, b) => b.date.localeCompare(a.date));
-  const editorNeedsPassword = editor?.mode === "edit" && isClosed(editor.row);
-  const deleteNeedsPassword = isClosed(deleteRow);
-  const protectedAction = editorNeedsPassword || deleteNeedsPassword;
-  const editorColumns = editor ? FORM_COLUMNS[editor.mode] : [];
+  const editorColumns = editor
+    ? FORM_COLUMNS[editor.mode].filter(({ key }) => key !== "dutySignature")
+    : [];
+  const selectedVehicle = availableVehicles.find(
+    (vehicle) => vehicle.regNumber === editor?.entry.regNumber &&
+      vehicle.brand === editor?.entry.brand,
+  );
 
   function changeField(key: keyof Entry, rawValue: string) {
     const isReading =
@@ -272,6 +397,36 @@ function JournalPage() {
     setEditor((current) => {
       if (!current) return current;
       return { ...current, entry: { ...current.entry, [key]: value } as Entry };
+    });
+  }
+
+  function changeSubdivision(value: string) {
+    setEditor((current) => current && {
+      ...current,
+      entry: {
+        ...current.entry,
+        subdivision: value,
+        brand: "",
+        regNumber: "",
+        departureOdometer: null,
+        departureEngineHours: null,
+      },
+    });
+  }
+
+  function chooseVehicle(value: string) {
+    const vehicle = availableVehicles.find(({ id }) => String(id) === value);
+    if (!vehicle) return;
+
+    setEditor((current) => current && {
+      ...current,
+      entry: {
+        ...current.entry,
+        brand: vehicle.brand,
+        regNumber: vehicle.regNumber,
+        departureOdometer: vehicle.currentMileage,
+        departureEngineHours: passportEngineHours(vehicle),
+      },
     });
   }
 
@@ -316,19 +471,50 @@ function JournalPage() {
     setDeleteRow(null);
   }
 
-  function handleEdit() {
+  function requestPassword(action: "edit" | "delete") {
     if (!selected) return;
-    openEditor("edit", selected);
+    verifiedPassword.current = undefined;
+    setPasswordRequest({ action, row: selected });
   }
 
-  function handleDelete() {
-    if (!selected) return;
-    setDeleteRow(selected);
-    setEditor(null);
+  async function confirmPassword() {
+    if (!passwordRequest || checkingPassword) return;
+    const password = passwordInput.current?.value;
+    if (!password) {
+      toast.error("Введите пароль");
+      return;
+    }
+
+    setCheckingPassword(true);
+    try {
+      const response = await fetch("/api/journal/verify-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error || "Не удалось проверить пароль");
+      }
+
+      verifiedPassword.current = password;
+      setPasswordRequest(null);
+      if (passwordRequest.action === "edit") {
+        openEditor("edit", passwordRequest.row);
+      } else {
+        setDeleteRow(passwordRequest.row);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось проверить пароль");
+    } finally {
+      setCheckingPassword(false);
+    }
   }
 
   function closeModal() {
-    if (saveMutation.isPending) return;
+    if (saveMutation.isPending || checkingPassword) return;
+    verifiedPassword.current = undefined;
+    setPasswordRequest(null);
     setEditor(null);
     setDeleteRow(null);
   }
@@ -336,12 +522,7 @@ function JournalPage() {
   function handleSave() {
     if (busy) return;
 
-    const password = protectedAction ? passwordInput.current?.value : undefined;
-
-    if (protectedAction && !password) {
-      toast.error("Введите пароль");
-      return;
-    }
+    const password = verifiedPassword.current;
 
     if (deleteRow) {
       saveMutation.mutate({ action: "delete", id: deleteRow.id, password });
@@ -361,6 +542,14 @@ function JournalPage() {
     if ((mode === "arrival" || isClosed(row)) && (!entry.arrivalDate || !entry.arrivalTime)) {
       toast.error("Заполните дату и время прибытия");
       return;
+    }
+
+    if (mode === "arrival" || isClosed(row)) {
+      const error = arrivalValidationError(entry);
+      if (error) {
+        toast.error(error);
+        return;
+      }
     }
 
     if (mode === "departure") {
@@ -415,7 +604,7 @@ function JournalPage() {
           <Button
             variant="outline"
             className="h-[38px] rounded-md"
-            onClick={handleEdit}
+            onClick={() => requestPassword("edit")}
             disabled={busy || !selected}
           >
             Изменить строку
@@ -423,7 +612,7 @@ function JournalPage() {
           <Button
             variant="outline"
             className="h-[38px] rounded-md border-red-200 text-red-600"
-            onClick={handleDelete}
+            onClick={() => requestPassword("delete")}
             disabled={busy || !selected}
           >
             Удалить строку
@@ -556,6 +745,41 @@ function JournalPage() {
       </div>
 
       <Modal
+        open={passwordRequest !== null}
+        onClose={closeModal}
+        title={passwordRequest?.action === "delete" ? "Пароль для удаления" : "Пароль для изменения"}
+        size="sm"
+        footer={
+          <>
+            <Button variant="outline" onClick={closeModal} disabled={checkingPassword}>
+              Отмена
+            </Button>
+            <Button onClick={confirmPassword} disabled={checkingPassword}>
+              {checkingPassword ? "Проверка…" : "Продолжить"}
+            </Button>
+          </>
+        }
+      >
+        {passwordRequest && (
+          <Field label="Пароль">
+            <Input
+              ref={passwordInput}
+              type="password"
+              autoFocus
+              autoComplete="current-password"
+              disabled={checkingPassword}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void confirmPassword();
+                }
+              }}
+            />
+          </Field>
+        )}
+      </Modal>
+
+      <Modal
         open={editor !== null}
         onClose={closeModal}
         title={editor ? FORM_TITLES[editor.mode] : ""}
@@ -574,48 +798,96 @@ function JournalPage() {
         {editor && (
           <div>
             {editor.mode === "arrival" && editor.row && <DepartureSummary row={editor.row} />}
-            {protectedAction && (
-              <Field label="Пароль для изменения записи" className="mb-4">
-                <Input
-                  ref={passwordInput}
-                  type="password"
-                  autoComplete="current-password"
-                  disabled={saveMutation.isPending}
-                />
-              </Field>
-            )}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {editorColumns.map(({ key, label, type }) => (
-                <Field
-                  key={key}
-                  label={label}
-                  className={type === "textarea" ? "sm:col-span-2" : undefined}
-                >
-                  {type === "textarea" ? (
-                    <textarea
-                      rows={3}
-                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-                      value={String(editor.entry[key] ?? "")}
-                      disabled={saveMutation.isPending}
-                      onChange={(event) =>
-                        setEditor((current) =>
-                          current && {
-                            ...current,
-                            entry: { ...current.entry, [key]: event.target.value } as Entry,
-                          },
-                        )
-                      }
-                    />
-                  ) : (
-                    <Input
-                      type={type ?? "text"}
-                      value={editor.entry[key] === null || editor.entry[key] === undefined ? "" : String(editor.entry[key])}
-                      disabled={saveMutation.isPending}
-                      onChange={(event) => changeField(key, event.target.value)}
-                    />
-                  )}
-                </Field>
-              ))}
+            <div className="grid grid-cols-1 items-start gap-x-5 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
+              {editorColumns.map(({ key, label, type }) => {
+                const fieldId = `journal-field-${key}`;
+                const value = String(editor.entry[key] ?? "");
+                const saving = saveMutation.isPending;
+                return (
+                  <Fragment key={key}>
+                    {key === "departureCondition" && (
+                      <h3 className="col-span-full border-b pb-2 text-sm font-semibold">
+                        Машина убыла из парка
+                      </h3>
+                    )}
+                    {key === "arrivalDate" && (
+                      <h3 className="col-span-full border-b pb-2 text-sm font-semibold">
+                        Машина прибыла в парк
+                      </h3>
+                    )}
+                    <div className="min-w-0">
+                      <label htmlFor={fieldId} className={`mb-1 ${formLabel}`}>
+                        {fieldLabels[key] ?? label}
+                      </label>
+                      {key === "subdivision" ? (
+                        <select
+                          id={fieldId}
+                          className={formSelect}
+                          value={value}
+                          disabled={saving || registryLoading || registryFailed}
+                          onChange={(event) => changeSubdivision(event.target.value)}
+                        >
+                          <option value="">
+                            {registryFailed ? "Перечень ВВСТ недоступен"
+                              : registryLoading ? "Загрузка подразделений…"
+                                : "Выберите подразделение"}
+                          </option>
+                          {subdivisions.map((unit) => <option key={unit}>{unit}</option>)}
+                        </select>
+                      ) : key === "brand" ? (
+                        <select
+                          id={fieldId}
+                          className={formSelect}
+                          value={selectedVehicle?.id ?? ""}
+                          disabled={saving || registryLoading || registryFailed || !subdivision || !availableVehicles.length}
+                          onChange={(event) => chooseVehicle(event.target.value)}
+                        >
+                          <option value="" disabled>
+                            {value || (registryFailed ? "Перечень ВВСТ недоступен"
+                              : registryLoading ? "Загрузка машин…"
+                                : !subdivision ? "Сначала выберите подразделение"
+                                  : availableVehicles.length ? "Выберите машину из перечня"
+                                    : "Нет машин в этом подразделении")}
+                          </option>
+                          {availableVehicles.map((vehicle) => (
+                            <option key={vehicle.id} value={vehicle.id}>
+                              {vehicle.brand} — {vehicle.regNumber}
+                            </option>
+                          ))}
+                        </select>
+                      ) : key === "returnDeadline" ? (
+                        <select
+                          id={fieldId}
+                          className={formSelect}
+                          value={value}
+                          disabled={saving}
+                          onChange={(event) => changeField(key, event.target.value)}
+                        >
+                          {returnDeadlines.map((time) => <option key={time}>{time}</option>)}
+                        </select>
+                      ) : type === "textarea" ? (
+                        <textarea
+                          id={fieldId}
+                          rows={2}
+                          className="min-h-[58px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                          value={value}
+                          disabled={saving}
+                          onChange={(event) => changeField(key, event.target.value)}
+                        />
+                      ) : (
+                        <Input
+                          id={fieldId}
+                          type={type ?? "text"}
+                          readOnly={key === "regNumber"}
+                          value={value}
+                          disabled={saving}
+                          onChange={(event) => changeField(key, event.target.value)}
+                        />
+                      )}
+                    </div>
+                  </Fragment>
+                );
+              })}
             </div>
           </div>
         )}
@@ -642,16 +914,6 @@ function JournalPage() {
             <p className="text-sm">
               Удалить запись от {displayDate(deleteRow.date)} для машины {deleteRow.regNumber}?
             </p>
-            {protectedAction && (
-              <Field label="Пароль для удаления записи" className="mt-4">
-                <Input
-                  ref={passwordInput}
-                  type="password"
-                  autoComplete="current-password"
-                  disabled={saveMutation.isPending}
-                />
-              </Field>
-            )}
           </div>
         )}
       </Modal>

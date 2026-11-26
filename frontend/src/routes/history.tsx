@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Plus, Edit, Trash2 } from "lucide-react";
 import { Button, Field, Input, Modal, PageHeader, Panel, Select } from "@/components/ui-kit";
 import { apiGetCollection, apiPutCollection } from "@/lib/api";
-import { useAppState } from "@/lib/store";
+import type { VehicleDto } from "@/lib/types";
 import { useState, useMemo } from "react";
 import { toast } from "sonner";
 import {
@@ -32,7 +32,12 @@ function HistoryPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
-  const vehicles = useAppState((s) => s.vehicles);
+  const { data: fleet = [] } = useQuery({
+    queryKey: ["vehicles"],
+    queryFn: () => apiGetCollection<VehicleDto>("vehicles"),
+    refetchOnMount: "always",
+  });
+  const vehicles = fleet.map(vehicle => ({ ...vehicle, plate: vehicle.regNumber }));
   const vehicleName = (id: number) => {
     const v = vehicles.find((x) => x.id === id);
     return v ? `${v.brand} (${v.plate})` : `ID ${id}`;
@@ -107,7 +112,6 @@ function HistoryPage() {
   const ids = new Set(visible.map(v => v.id));
   const records = items.filter(r => r.date.startsWith(prefix) && ids.has(r.vehicleId));
   type Reading = { km: number; hours: number | null };
-  const periods = new Map<string, Reading>();
   const daily = new Map<string, Reading>();
   const totals = new Map<number, Reading>();
   function add(previous: Reading | undefined, record: ExploitationItem): Reading {
@@ -115,8 +119,6 @@ function HistoryPage() {
   }
   for (const record of records) {
     const key = record.vehicleId + "/" + record.date.slice(0, month ? 10 : 7);
-    const period = record.date.slice(0, month ? 10 : 7);
-    periods.set(period, add(periods.get(period), record));
     daily.set(key, add(daily.get(key), record));
     totals.set(record.vehicleId, add(totals.get(record.vehicleId), record));
   }
@@ -136,7 +138,6 @@ function HistoryPage() {
     }
     return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
   };
-  const chartData = useMemo(() => toChart(records), [records]);
   const dayChartData = useMemo(() => toChart(sorted), [sorted]);
   return (
     <div>
@@ -154,32 +155,6 @@ function HistoryPage() {
       <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
         {Object.entries({ "Всего машин": visible.length, "С выездами": new Set(records.map(r => r.vehicleId)).size, "Общий пробег / моточасы": total.toLocaleString("ru-RU") + " км / " + hours.toLocaleString("ru-RU") + " мч", "Средний на машину": Math.round(total / (new Set(records.map(r => r.vehicleId)).size || 1)) + " км" }).map(([label, value]) => <Panel key={label} className="rounded-lg px-4 py-3"><div className="eyebrow">{label}</div><div className="mt-1 text-xl font-semibold">{value}</div></Panel>)}
       </div>
-      <details className="mb-4 rounded-lg border bg-white px-4 py-3"><summary className="cursor-pointer text-sm font-medium">График пробега и моточасов</summary>
-        <div className="mt-3 space-y-2">{periods.size === 0 ? <p className="text-sm text-neutral-500">За выбранный период записей нет</p> : Array.from(periods).sort(([a], [b]) => a.localeCompare(b)).map(([period, reading]) => <div key={period} className="grid grid-cols-[7rem_1fr_auto] items-center gap-3 text-xs">
-          <span>{period.split("-").reverse().join(".")}</span>
-          <meter aria-label={"Пробег " + period} className="w-full" min={0} max={Math.max(1, ...Array.from(periods.values(), item => item.km))} value={reading.km} />
-          <span>{formatReading(reading)} {reading.hours == null ? "км" : "км / ч"}</span>
-        </div>)}</div>
-      </details>
-      {chartData.length > 1 && (
-        <Panel className="mb-4 p-4">
-          <h3 className="mb-3 text-sm font-semibold">Наработка: км / моточасы</h3>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 0, left: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                <XAxis dataKey="date" fontSize={11} />
-                <YAxis yAxisId="km" fontSize={11} tickFormatter={(v: number) => v.toLocaleString("ru-RU")} />
-                <YAxis yAxisId="moto" orientation="right" fontSize={11} />
-                <Tooltip />
-                <Legend />
-                <Bar yAxisId="km" dataKey="km" name="Пробег, км" fill="#2563eb" radius={[3, 3, 0, 0]} />
-                <Line yAxisId="moto" dataKey="moto" name="Моточасы" stroke="#dc2626" dot={{ r: 2 }} connectNulls />
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </Panel>
-      )}
       <Panel className="overflow-auto rounded-lg">
         <table className="w-full border-collapse text-center text-xs">
           <thead className="bg-neutral-50"><tr><th className="sticky left-0 bg-neutral-50 p-3 text-left font-normal">МАШИНА</th>{columns.map(i => <th key={i} className={"min-w-12 px-2 py-3 font-medium " + todayColumn(i)}>{month ? String(i).padStart(2, "0") : months[i - 1]}{month > 0 && <span className="block text-[10px] font-normal uppercase text-neutral-500">{new Date(year, month - 1, i).toLocaleDateString("ru-RU", { weekday: "short" })}</span>}</th>)}<th className="px-3 font-normal">ИТОГО</th></tr></thead>

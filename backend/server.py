@@ -463,6 +463,33 @@ _JOURNAL_ARRIVAL_FIELDS = {'arrivalDate', 'arrivalTime', 'arrivalCondition', 'ar
 _JOURNAL_ARRIVAL_ONLY_FIELDS = _JOURNAL_ARRIVAL_FIELDS - _JOURNAL_DEPARTURE_FIELDS
 _JOURNAL_DEFAULT_ENTRY = {'date': '', 'subdivision': '', 'driver': '', 'waybillNumber': '', 'brand': '', 'regNumber': '', 'departureCondition': 'ТИ', 'departureSeal': 'ОПЛ', 'departureOdometer': None, 'departureTime': '', 'purpose': '', 'authority': '', 'returnDeadline': '18:00', 'arrivalDate': '', 'arrivalTime': '', 'arrivalCondition': '', 'arrivalSeal': '', 'arrivalOdometer': None, 'remarks': '', 'dutySignature': '', 'departureEngineHours': None, 'arrivalEngineHours': None, 'speedometer': None, 'closedAt': None}
 
+_JOURNAL_READING_FIELDS = (
+    'date', 'arrivalDate', 'departureTime', 'arrivalTime',
+    'departureOdometer', 'arrivalOdometer', 'departureEngineHours', 'arrivalEngineHours',
+)
+
+
+def _validate_journal_arrival(entry, previous=None):
+    if previous is not None and all(
+        entry.get(field) == previous.get(field) for field in _JOURNAL_READING_FIELDS
+    ):
+        return
+
+    arrival_date = entry['arrivalDate']
+    if arrival_date and arrival_date < entry['date']:
+        raise ValidationError('Дата прибытия не может быть раньше даты выезда')
+    if (arrival_date == entry['date'] and entry['departureTime'] and entry['arrivalTime']
+            and entry['arrivalTime'] < entry['departureTime']):
+        raise ValidationError('Время прибытия в день выезда не может быть раньше времени выезда')
+    for start, end, label in (
+        ('departureOdometer', 'arrivalOdometer', 'спидометра'),
+        ('departureEngineHours', 'arrivalEngineHours', 'моточасов'),
+    ):
+        first, last = entry.get(start), entry.get(end)
+        if first is not None and last is not None and last < first:
+            raise ValidationError(f'Показание {label} при прибытии не может быть меньше показания при выезде')
+
+
 def _journal_closed(payload: 'dict[str, Any]') -> 'bool':
     return bool(payload.get('closedAt'))
 
@@ -1173,6 +1200,162 @@ class PlannerStore:
             row = db.execute('SELECT 1 FROM planner_access_credentials WHERE scope = %s', (scope,)).fetchone()
         return row is not None
 
+    @staticmethod
+    def _journal_vehicle(entry, vehicles):
+        number = _document_key(entry['regNumber'])
+        if not number:
+            return None
+        matches = [vehicle for vehicle in vehicles if _document_key(vehicle['regNumber']) == number]
+        if len(matches) > 1:
+            matches = [vehicle for vehicle in matches
+                       if _document_key(vehicle['brand']) == _document_key(entry['brand'])]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _vehicle_hours(vehicle):
+        field = next((item for item in vehicle.get('passportData') or []
+                      if _document_key(item['header']) == 'текущиепоказаниямоточасов'), None)
+        value = field['value'] if field is not None else None
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(''.join(str(value).split()).replace(',', '.'))
+        except ValueError:
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    @staticmethod
+    def _write_vehicle_readings(db, vehicle, km, hours):
+        updated = dict(vehicle)
+        if km is not None:
+            updated['currentMileage'] = km
+        fields = [dict(field) for field in vehicle.get('passportData') or []]
+        odometer = next((field for field in fields
+                         if _document_key(field['header']) == 'текущиепоказанияспидометра'), None)
+        if odometer is not None and km is not None:
+            odometer['value'] = km
+        if hours is not None:
+            field = next((field for field in fields
+                          if _document_key(field['header']) == 'текущиепоказаниямоточасов'), None)
+            if field is None:
+                field = {'header': 'Текущие показания МОТОЧАСОВ',
+                         'column': max((field['column'] for field in fields), default=0) + 1}
+                fields.append(field)
+            field['value'] = hours
+        if odometer is not None or hours is not None:
+            updated['passportData'] = fields
+        VehicleDTO.parse(updated)
+        db.execute(
+            "UPDATE planner_items SET payload = %s WHERE collection = 'vehicles' AND item_id = %s",
+            (Jsonb(updated), vehicle['id']),
+        )
+
+    @staticmethod
+    def _append_exploitation(db, reading):
+        next_id = db.execute(
+            "SELECT COALESCE(MAX(item_id), 0) + 1 FROM planner_items WHERE collection = 'exploitation'"
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO planner_items (collection, item_id, payload) VALUES ('exploitation', %s, %s)",
+            (next_id, Jsonb(ExploitationDTO.parse(reading))),
+        )
+
+    def save_duty_readings(self, body):
+        _exact_fields(body, {'vehicleId', 'date', 'startKm', 'startHours', 'endKm', 'endHours'})
+        vehicle_id = body['vehicleId']
+        if type(vehicle_id) is not int or not 1 <= vehicle_id <= MAX_DATABASE_ID:
+            raise ValidationError('Некорректный идентификатор машины')
+        _iso_date(body['date'], 'date')
+        _nonnegative_int(body['startKm'], 'km')
+        start_hours, end_hours = body['startHours'], body['endHours']
+        end_km = body['endKm']
+        for value in (start_hours, end_hours):
+            if value is not None:
+                _nonnegative_number(value, 'engineHours')
+        if end_km is not None:
+            _nonnegative_int(end_km, 'km')
+        if end_km is None and end_hours is None:
+            raise ValidationError('Введите конечные показания')
+        with self.connect() as db:
+            self._lock_journal(db)
+            row = db.execute(
+                "SELECT payload FROM planner_items WHERE collection = 'vehicles' AND item_id = %s FOR UPDATE",
+                (vehicle_id,),
+            ).fetchone()
+            if row is None:
+                raise ValidationError('Машина не найдена в перечне ВВСТ')
+            vehicle = row[0]
+            start_km = vehicle['currentMileage']
+            if body['startKm'] != start_km or start_hours != self._vehicle_hours(vehicle):
+                raise ConflictError('Показания изменились. Проверьте новые начальные значения.')
+            if end_km is not None and end_km < start_km or (
+                end_hours is not None and start_hours is not None and end_hours < start_hours
+            ):
+                raise ValidationError('Конечные показания не могут быть меньше начальных')
+            self._write_vehicle_readings(db, vehicle, end_km, end_hours)
+            km = end_km - start_km if end_km is not None else None
+            hours = end_hours - start_hours if end_hours is not None and start_hours is not None else None
+            if km is not None or hours is not None:
+                self._append_exploitation(db, {
+                    'vehicleId': vehicle_id, 'date': body['date'],
+                    'km': km if km is not None else 0, 'engineHours': hours,
+                })
+
+    def _journal_exploitation_entry(self, entry, vehicles):
+        if not entry.get('arrivalDate') or not entry.get('arrivalTime'):
+            return None
+
+        def difference(start, end):
+            first, last = entry.get(start), entry.get(end)
+            if first is None or last is None or last < first:
+                return None
+            return last - first
+
+        km = difference('departureOdometer', 'arrivalOdometer')
+        hours = difference('departureEngineHours', 'arrivalEngineHours')
+        if km is None and hours is None:
+            return None
+
+        vehicle = self._journal_vehicle(entry, vehicles)
+        if vehicle is None:
+            return None
+        return ExploitationDTO.parse({
+            'vehicleId': vehicle['id'],
+            'date': entry['arrivalDate'],
+            'km': km if km is not None else 0,
+            'engineHours': hours,
+            'journalEntryId': entry['id'],
+        })
+
+    def _sync_journal_exploitation(self, db, entry, previous=None):
+        rows = db.execute("SELECT payload FROM planner_items WHERE collection = 'vehicles' ORDER BY item_id FOR UPDATE").fetchall()
+        vehicles = [payload for (payload,) in rows]
+        vehicle = self._journal_vehicle(entry, vehicles)
+        same_vehicle = previous is not None and all(
+            _document_key(entry[key]) == _document_key(previous[key]) for key in ('regNumber', 'brand')
+        )
+        if vehicle is not None and entry.get('arrivalDate') and entry.get('arrivalTime'):
+            km, hours = entry.get('arrivalOdometer'), entry.get('arrivalEngineHours')
+            current_km, current_hours = vehicle['currentMileage'], self._vehicle_hours(vehicle)
+            if km is not None and km < current_km and not (
+                same_vehicle and current_km == previous.get('arrivalOdometer')
+            ):
+                km = None
+            if hours is not None and current_hours is not None and hours < current_hours and not (
+                same_vehicle and current_hours == previous.get('arrivalEngineHours')
+            ):
+                hours = None
+            if km is not None or hours is not None:
+                self._write_vehicle_readings(db, vehicle, km, hours)
+
+        reading = self._journal_exploitation_entry(entry, vehicles)
+        db.execute(
+            "DELETE FROM planner_items WHERE collection = 'exploitation' AND payload->'journalEntryId' = to_jsonb(%s::bigint)",
+            (entry['id'],),
+        )
+        if reading is not None:
+            self._append_exploitation(db, reading)
+
     def replace_mileage_state(self, raw: 'Any') -> 'dict[str, list[dict[str, Any]]]':
         _exact_fields(raw, {'journal', 'vehicles', 'exploitation'})
         definitions = {'vehicles': (VehicleDTO, 'id'), 'journal': (JournalEntryDTO, 'id'), 'exploitation': (ExploitationDTO, None)}
@@ -1190,6 +1373,13 @@ class PlannerStore:
         with self.connect() as db:
             self._lock_journal(db)
             self._validate_journal_replacement(db, parsed['journal'])
+            readings = {
+                entry['id']: reading for entry in parsed['journal']
+                if (reading := self._journal_exploitation_entry(entry, parsed['vehicles'])) is not None
+            }
+            parsed['exploitation'] = [
+                item for item in parsed['exploitation'] if item.get('journalEntryId') not in readings
+            ] + list(readings.values())
             for collection, items in parsed.items():
                 db.execute('DELETE FROM planner_items WHERE collection = %s', (collection,))
                 key = definitions[collection][1]
@@ -1211,6 +1401,7 @@ class PlannerStore:
         parsed = [dto.parse(value) for value in values]
         if dto is ExploitationDTO:
             with self.connect() as db:
+                self._lock_journal(db)
                 db.execute('DELETE FROM planner_items WHERE collection = %s', (collection,))
                 db.cursor().executemany('INSERT INTO planner_items (collection, item_id, payload) VALUES (%s, %s, %s)', [(collection, index, Jsonb(item)) for index, item in enumerate(parsed, start=1)])
             return parsed
@@ -1239,6 +1430,7 @@ class PlannerStore:
         for item in parsed:
             incoming_ids.add(item['id'])
             old = existing.get(item['id'])
+            _validate_journal_arrival(item, old)
             if old is None:
                 if item.get('closedAt') is not None:
                     raise ValidationError('Нельзя создать уже закрытую запись журнала через общий PUT')
@@ -1305,7 +1497,9 @@ class PlannerStore:
             if not updated.get('arrivalDate') or not updated.get('arrivalTime'):
                 raise ValidationError('Заполните дату и время прибытия')
             parsed = JournalEntryDTO.parse(updated)
+            _validate_journal_arrival(parsed)
             db.execute("UPDATE planner_items SET payload = %s WHERE collection = 'journal' AND item_id = %s", (Jsonb(parsed), item_id))
+            self._sync_journal_exploitation(db, parsed)
         return parsed
 
     def journal_edit(self, item_id: 'int', fields: 'Any', password: 'str | None'=None) -> 'dict[str, Any]':
@@ -1322,7 +1516,10 @@ class PlannerStore:
             elif fields.keys() & _JOURNAL_ARRIVAL_ONLY_FIELDS:
                 raise ValidationError('Поля прибытия можно изменить только при закрытии записи')
             parsed = JournalEntryDTO.parse({**payload, **fields})
+            _validate_journal_arrival(parsed, payload)
             db.execute("UPDATE planner_items SET payload = %s WHERE collection = 'journal' AND item_id = %s", (Jsonb(parsed), item_id))
+            if closed:
+                self._sync_journal_exploitation(db, parsed, payload)
         return parsed
 
     def journal_delete(self, item_id: 'int', password: 'str | None'=None) -> 'bool':
@@ -1334,6 +1531,10 @@ class PlannerStore:
             if _journal_closed(payload) and not self._journal_password_matches(db, password):
                 raise JournalPermissionError('Для удаления закрытой записи журнала нужен верный пароль')
             db.execute("DELETE FROM planner_items WHERE collection = 'journal' AND item_id = %s", (item_id,))
+            db.execute(
+                "DELETE FROM planner_items WHERE collection = 'exploitation' AND payload->'journalEntryId' = to_jsonb(%s::bigint)",
+                (item_id,),
+            )
         return True
 
     def list_standing_ids(self) -> 'list[int]':
@@ -1672,6 +1873,45 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
             path = urlparse(self.path).path
             if path.startswith('/api/documents/'):
                 self.handle_document(path)
+                return
+            if path == '/api/duty/readings':
+                if not self.check_authentication():
+                    self.send_json(401, {'error': 'Требуется вход в приложение'})
+                    return
+                try:
+                    store.save_duty_readings(self.read_body())
+                    self.send_json(200, {'ok': True})
+                except ValidationError as exc:
+                    self.send_json(400, {'error': str(exc)})
+                except ConflictError as exc:
+                    self.send_json(409, {'error': str(exc)})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'database unavailable'})
+                return
+            if path == '/api/journal/verify-password':
+                try:
+                    body = self.read_body()
+                    _exact_fields(body, {'password'})
+                    password = body['password']
+                    _string(password, 'password')
+                    if len(password) > ACCESS_PASSWORD_MAX_LENGTH:
+                        raise ValidationError('Пароль слишком длинный')
+                    attempt_key = f'{self.client_address[0]}:journal'
+                    if not login_attempt_allowed(attempt_key):
+                        self.send_json(429, {'error': 'Слишком много попыток. Попробуйте позже.'})
+                        return
+                    with store.connect() as db:
+                        allowed = store._journal_password_matches(db, password)
+                    if not allowed:
+                        record_login_failure(attempt_key)
+                        self.send_json(403, {'error': 'Неверный пароль'})
+                        return
+                    clear_login_failures(attempt_key)
+                    self.send_json(200, {'ok': True})
+                except ValidationError as exc:
+                    self.send_json(400, {'error': str(exc)})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'database unavailable'})
                 return
             if path == '/api/journal/actions':
                 try:

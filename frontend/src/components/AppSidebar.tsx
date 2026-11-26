@@ -45,7 +45,7 @@ export function AppSidebar() {
             activeProps={{ className: "!border-sidebar-active-foreground bg-sidebar-active text-sidebar-active-foreground" }}
           >
             <span>{item.label}</span>
-            {(item.to === "/vvst" || item.to === "/order") && <Lock className="h-3.5 w-3.5 shrink-0 text-sidebar-muted" />}
+            {item.to !== "/journal" && item.to !== "/duty" && <Lock className="h-3.5 w-3.5 shrink-0 text-sidebar-muted" />}
           </Link>
           {item.to === "/order" && <button type="button" aria-label="Разделы наряда" aria-expanded={expanded} className="px-3 hover:bg-sidebar-active" onClick={() => setExpanded(!expanded)}><ChevronDown size={16} className={expanded ? "" : "-rotate-90"} /></button>}
           </div>
