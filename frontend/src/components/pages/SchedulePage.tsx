@@ -97,8 +97,9 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   const [modalOpen, setModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ScheduleItem | null>(null);
   const [formData, setFormData] = useState<Partial<ScheduleItem>>({});
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  const [deleteTarget, setDeleteTarget] = useState<Set<number> | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -159,17 +160,20 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
     setModalOpen(true);
   };
 
-  const handleDelete = (id: number) => {
-    setDeleteTarget(id);
-    setDeleteOpen(true);
-  };
-
-  const performDelete = () => {
-    if (deleteTarget === null) return;
-    const updated = items.filter((i) => i.id !== deleteTarget);
-    saveMutation.mutate(updated);
-    setDeleteOpen(false);
-    setDeleteTarget(null);
+  const performDelete = async () => {
+    if (!deleteTarget?.size || deleting || saveMutation.isPending) return;
+    setDeleting(true);
+    try {
+      const latest = await apiGetCollection<ScheduleItem>(collectionName);
+      const updated = latest.filter(item => !deleteTarget.has(item.id));
+      await saveMutation.mutateAsync(updated);
+      setSelectedIds(previous => new Set([...previous].filter(id => !deleteTarget.has(id))));
+      setDeleteTarget(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось удалить строки");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const handleSave = () => {
@@ -355,6 +359,9 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
 
   const monthPrefix = currentYear + "-" + String(currentMonth + 1).padStart(2, "0");
   const monthItems = items.filter(item => [item.date, ...(item.scheduleDates ?? [])].some(date => date.startsWith(monthPrefix)));
+  const selectedMonthIds = monthItems.filter(item => selectedIds.has(item.id)).map(item => item.id);
+  const allSelected = monthItems.length > 0 && selectedMonthIds.length === monthItems.length;
+
   const daysInMonth = getDaysInMonth(currentYear, currentMonth + 1);
   const dayRangeEndClamped = Math.min(dayRangeEnd, daysInMonth);
 
@@ -370,6 +377,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   }, [currentYear, currentMonth, dayRangeStart, dayRangeEndClamped]);
 
   const prevMonth = () => {
+    setSelectedIds(new Set());
     if (currentMonth === 0) {
       setCurrentYear(currentYear - 1);
       setCurrentMonth(11);
@@ -379,6 +387,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   };
 
   const nextMonth = () => {
+    setSelectedIds(new Set());
     if (currentMonth === 11) {
       setCurrentYear(currentYear + 1);
       setCurrentMonth(0);
@@ -446,7 +455,12 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
       </Modal>
 
       <Panel className="mb-4 flex flex-col items-end gap-2 rounded-lg p-3">
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+            <Button variant="danger" disabled={!selectedMonthIds.length || deleting || saveMutation.isPending}
+              onClick={() => setDeleteTarget(new Set(selectedMonthIds))}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Удалить выбранные ({selectedMonthIds.length})
+            </Button>
             <Button variant="outline" onClick={() => { closeImport(); setImportOpen(true); }}>
               Импорт Excel
             </Button>
@@ -486,7 +500,10 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
           <thead className="sticky top-0 z-10 bg-neutral-50 text-[10px] uppercase text-neutral-500 [&_th]:font-normal">
             <tr className="border-b border-border">
               <th className="w-12 px-3 py-3">
-                <input type="checkbox" aria-label="Выбрать все" />
+                <input type="checkbox" aria-label="Выбрать все строки за месяц"
+                  checked={allSelected} disabled={!monthItems.length || deleting || saveMutation.isPending}
+                  ref={element => { if (element) element.indeterminate = !allSelected && selectedMonthIds.length > 0; }}
+                  onChange={event => setSelectedIds(new Set(event.target.checked ? monthItems.map(item => item.id) : []))} />
               </th>
               <th className="px-3 py-3 text-left">{columns.name}</th>
               <th className="px-3 py-3 text-left">МЕСТО</th>
@@ -510,9 +527,19 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
               </tr>
             ) : (
               monthItems.map((item) => (
-                <tr key={item.id} className="border-b border-border">
+                <tr key={item.id} className={cn("border-b border-border", selectedIds.has(item.id) && "bg-accent")}>
                   <td className="px-3 py-3 text-center">
-                    <input type="checkbox" aria-label={`Выбрать ${item.title}`} />
+                    <input type="checkbox" aria-label={`Выбрать ${item.title}`}
+                      checked={selectedIds.has(item.id)} disabled={deleting || saveMutation.isPending}
+                      onChange={event => {
+                        const checked = event.target.checked;
+                        setSelectedIds(previous => {
+                          const next = new Set(previous);
+                          if (checked) next.add(item.id);
+                          else next.delete(item.id);
+                          return next;
+                        });
+                      }} />
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center justify-between gap-2">
@@ -526,7 +553,8 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
                         </button>
                         <button
                           className="no-print text-muted-foreground hover:text-destructive"
-                          onClick={() => handleDelete(item.id)}
+                          disabled={deleting || saveMutation.isPending}
+                          onClick={() => setDeleteTarget(new Set([item.id]))}
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -642,22 +670,22 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
       </Modal>
 
       <Modal
-        open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
+        open={deleteTarget !== null}
+        onClose={() => { if (!deleting) setDeleteTarget(null); }}
         title="Подтверждение удаления"
         size="sm"
         footer={
           <>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
+            <Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>
               Отмена
             </Button>
-            <Button variant="danger" onClick={performDelete}>
+            <Button variant="danger" disabled={deleting || saveMutation.isPending} onClick={performDelete}>
               Удалить
             </Button>
           </>
         }
       >
-        <p className="text-sm">Вы уверены, что хотите удалить эту запись? Это действие нельзя отменить.</p>
+        <p className="text-sm">Будет удалено строк: {deleteTarget?.size ?? 0}.</p>
       </Modal>
     </div>
   );

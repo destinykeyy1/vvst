@@ -295,6 +295,19 @@ function eligibleTrainingVehicle(vehicle: { brand: string; plate: string; group?
     !(/(?:БМП|BMP)/i.test(vehicle.brand) && number !== undefined && Number(number) >= 400);
 }
 
+function isDutyRequest(brand: string) {
+  const label = brand.trim().replace(/^[«"‘“(]+\s*/, "");
+  return /^(?:(?:санитарный|дежурный)\s+автомобиль|дежурное\s+средство|подвозочный\s+автомобиль|автомобиль\s+под\s+перевозку)(?:[\s(,.:–—»”"-]|$)/i.test(label);
+}
+
+function savedDutyRoster(lines: OrderLine[], date: string) {
+  const completed = lines.filter(line => line.section === "duty" &&
+    line.date && line.date <= date && line.brand.trim() && line.regNumber.trim());
+  const sourceDate = completed.reduce((latest, line) =>
+    line.date && line.date > latest ? line.date : latest, "");
+  return { sourceDate, rows: completed.filter(line => line.date === sourceDate) };
+}
+
 function trainingRoute(route: string) {
   const value = route.trim();
   return /^[\p{L}\p{N}]+(?:[-’'][\p{L}\p{N}]+)*$/u.test(value) && !/^парк$/i.test(value)
@@ -421,6 +434,7 @@ function OrderPage({ selectedDate, setSelectedDate }: {
   const vehicles = useAppState((s) => s.vehicles);
 
   const SCHEDULE_COLLECTION: Partial<Record<OrderTab, string>> = {
+    duty: "schedules",
     training: "schedules",
     household: "household-schedules",
     other: "other-schedules",
@@ -434,20 +448,39 @@ function OrderPage({ selectedDate, setSelectedDate }: {
     rows: OrderLine[];
     skipped: { label: string; reason: string }[];
     emptyMessage?: string;
+    dutySourceDate?: string;
   } | null>(null);
 
   const handleAutopick = async () => {
     if (busy || hasChanges || !selectedDate) return;
     setPicking(true);
     try {
-      const collection = SCHEDULE_COLLECTION[activeTab];
-      const [items, unavailable, standing] = await Promise.all([
-        collection ? apiGetCollection<ScheduleItem>(collection) : Promise.resolve([]),
-        apiGetCollection<{ vehicleId: number; startDate: string; endDate: string }>("unavailable"),
-        duty ? apiGetCollection<number>("standing-vehicles") : Promise.resolve([]),
-      ]);
       const latest = queryClient.getQueryData<OrderLine[]>(["order-section-lines"]);
       if (!latest) throw new Error("Не удалось загрузить строки наряда");
+      if (duty) {
+        const roster = savedDutyRoster(latest, selectedDate);
+        if (roster.rows.length) {
+          let nextId = latest.reduce((max, row) => Math.max(max, row.id), Date.now()) + 1;
+          setPreview({
+            dutySourceDate: roster.sourceDate,
+            skipped: [],
+            rows: roster.sourceDate === selectedDate
+              ? latest.filter(row => row.section === "duty" && row.date === selectedDate)
+              : roster.rows.map(row => ({
+              ...row,
+              id: nextId++,
+              date: selectedDate,
+              scheduleRowId: undefined,
+            })),
+          });
+          return;
+        }
+      }
+      const collection = SCHEDULE_COLLECTION[activeTab];
+      const [items, unavailable] = await Promise.all([
+        collection ? apiGetCollection<ScheduleItem>(collection) : Promise.resolve([]),
+        duty ? Promise.resolve([]) : apiGetCollection<{ vehicleId: number; startDate: string; endDate: string }>("unavailable"),
+      ]);
       // Use the same dates as the marks in SchedulePage.
       const datesOf = (item: ScheduleItem) => [item.date, ...(item.scheduleDates ?? [])];
       const schedule = items.filter(item => datesOf(item).includes(selectedDate));
@@ -480,30 +513,27 @@ function OrderPage({ selectedDate, setSelectedDate }: {
         rows.push(row);
         reserved.push(row);
       };
-      if (duty) {
-        for (const vehicleId of standing) {
-          const vehicle = vehicles.find(item => item.id === vehicleId);
-          const line = makeLine();
-          assign(line, candidates.find(item => item.id === vehicleId &&
-            !reserved.some(row => row.regNumber === item.plate && overlaps(row, line))),
-            vehicle?.brand ?? String(vehicleId));
-        }
-      }
       for (const item of schedule) {
         const brand = item.requiredBrand?.trim() ?? "";
+        const dutyRequest = isDutyRequest(brand);
+        if (duty && !dutyRequest) continue;
         const person = item.instructor || item.teacher || "";
         for (let index = 0; index < (item.requiredQuantity ?? 1); index++) {
           const label = brand || item.title;
-          if (/^(санитарный|дежурный) автомобиль|^автомобиль под перевозку/i.test(brand)) {
-            skipped.push({ label, reason: "Дежурный или подвозочный автомобиль. Конкретная машина не назначается." });
+          if (!duty && dutyRequest) {
+            skipped.push({ label, reason: "Эта заявка относится к дежурным средствам." });
             continue;
           }
           const line = {
-            ...makeLine(), scheduleRowId: item.id, purpose: item.title,
+            ...makeLine(), scheduleRowId: item.id, purpose: item.title, brand,
             route: trainingRoute(item.route || item.location || ""),
             driver: person, responsible: person,
             departureTime: item.startTime || "", returnTime: item.endTime || "",
           };
+          if (duty) {
+            rows.push(line);
+            continue;
+          }
           const vehicle = candidates.find(candidate => brand &&
             candidate.brand.toLowerCase().includes(brand.toLowerCase()) &&
             !reserved.some(row => row.regNumber === candidate.plate && overlaps(row, line)));
@@ -518,7 +548,7 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       let emptyMessage: string | undefined;
       if (!rows.length && !skipped.length) {
         if (duty) {
-          emptyMessage = "В списке «Постоянные средства» нет машин. Этот раздел берёт машины из постоянных средств.";
+          emptyMessage = "На выбранную дату в расписании ОУП нет заявок на дежурные или подвозочные средства.";
         } else if (!items.length) {
           emptyMessage = "В расписании этого раздела пока нет записей.";
         } else if (!schedule.length) {
@@ -631,14 +661,14 @@ function OrderPage({ selectedDate, setSelectedDate }: {
       };
       const imported: OrderLine[] = rows
         .map((row, i) => {
-          const brand = pickString(row, "Марка", "Марка машины", "Техника", "Наименование");
+          const brand = pickString(row, "ТС", "Марка", "Марка машины", "Техника", "Наименование");
           const purpose = pickString(row, "Назначение", "Цель", "Название", "Наименование мероприятия");
           if (!brand && !purpose) return null;
           return {
             id: Date.now() + i,
             section: activeTab,
             brand,
-            regNumber: pickString(row, "Государственный регистрационный знак", "Гос. номер", "Госномер", "Номер"),
+            regNumber: pickString(row, "Государственный регистрационный знак", "Гос. номер", "Гос.номер", "Гос номер", "Госномер", "Номер"),
             usageGroup: pickString(row, "Группа", "Группа эксплуатации"),
             driver: pickString(row, "Водитель", "Ответственный", "Преподаватель"),
             route: trainingRoute(pickString(row, "Маршрут движения", "Маршрут")),
@@ -821,10 +851,12 @@ function OrderPage({ selectedDate, setSelectedDate }: {
         {preview && <div className="space-y-4 text-sm">
           <p>Наряд · {today}. Подтверждение заменит строки раздела «{heading}» за выбранный день.</p>
           {training && <p>Подбираются свободные машины указанных марок из групп УЧ, УСГ, УБГ и СТР, начиная с наибольшего остатка годовой нормы.</p>}
-          {duty && <p>Подбор по списку машин в постоянных средствах.</p>}
+          {duty && (preview.dutySourceDate
+            ? <p>Использован сохранённый состав за {archiveDate(preview.dutySourceDate)}. Проверьте машины и ответственных перед сохранением.</p>
+            : <p>Сохранённого состава пока нет. Показаны заявки из расписания ОУП, для которых можно указать машину вручную.</p>)}
           {preview.emptyMessage && <p className="rounded-md border bg-neutral-50 p-3">{preview.emptyMessage}</p>}
           <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
-            <p>Подобрано машин: {preview.rows.length}</p>
+            <p>{duty ? (preview.dutySourceDate ? "Строк из сохранённого состава" : "Заявок из расписания") : "Подобрано машин"}: {preview.rows.length}</p>
             <p>Пропущено позиций: {preview.skipped.length}</p>
           </div>
           {preview.skipped.length > 0 && <div className="max-h-56 overflow-auto rounded-md border">
