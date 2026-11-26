@@ -86,9 +86,40 @@ export interface JournalEntry {
   departureEngineHours?: number | null;
   arrivalEngineHours?: number | null;
   speedometer?: string | null;
+  closedAt?: string | null;
 }
 
 export type JournalRow = JournalEntry;
+
+export type JournalDepartureFields = Pick<
+  JournalEntry,
+  | "date"
+  | "subdivision"
+  | "driver"
+  | "waybillNumber"
+  | "brand"
+  | "regNumber"
+  | "departureCondition"
+  | "departureSeal"
+  | "departureOdometer"
+  | "departureEngineHours"
+  | "departureTime"
+  | "purpose"
+  | "authority"
+  | "returnDeadline"
+>;
+
+export type JournalArrivalFields = Pick<
+  JournalEntry,
+  | "arrivalDate"
+  | "arrivalTime"
+  | "arrivalCondition"
+  | "arrivalSeal"
+  | "arrivalOdometer"
+  | "arrivalEngineHours"
+  | "remarks"
+  | "dutySignature"
+>;
 
 export type ScheduleKind = "oup" | "household" | "other";
 

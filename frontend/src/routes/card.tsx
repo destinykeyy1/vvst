@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { CheckCircle2, Circle } from "lucide-react";
 import { Button, Input, PageHeader, Panel } from "@/components/ui-kit";
@@ -58,8 +58,8 @@ function CardListPage() {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1">
-                    <div className="font-medium">{vehicle.brand}</div>
-                    <div className="text-sm text-muted-foreground">{vehicle.plate}</div>
+                    <div className="text-sm">{vehicle.brand}</div>
+                    <div className="text-xs text-muted-foreground">{vehicle.plate}</div>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <CheckCircle2 className="h-4 w-4 text-success" />
@@ -71,6 +71,7 @@ function CardListPage() {
           </div>
         )}
       </Panel>
+      <Outlet />
     </div>
   );
 }

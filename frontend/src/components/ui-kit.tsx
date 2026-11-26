@@ -1,21 +1,21 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import { X } from "lucide-react";
-import { useEffect, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { useEffect, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
 export const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm transition-colors disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/85 disabled:opacity-40",
+        default: "bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-40",
         outline: "border border-border-strong bg-background text-foreground hover:bg-accent disabled:text-subtle disabled:border-border",
         danger: "border border-destructive-border bg-background text-destructive hover:bg-destructive/5 disabled:opacity-50",
         ghost: "text-foreground hover:bg-accent disabled:text-subtle",
         link: "text-subtle hover:text-foreground text-xs px-0 h-auto",
       },
       size: {
-        default: "h-[38px] px-3.5",
+        default: "min-h-9 px-4 py-2",
         sm: "h-8 px-2.5 text-xs",
         icon: "h-8 w-8",
       },
@@ -34,9 +34,10 @@ export function Button({
   return <button type={type} className={cn(buttonVariants({ variant, size }), className)} {...props} />;
 }
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export function Input({ className, ref, ...props }: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
   return (
     <input
+      ref={ref}
       className={cn(
         "h-[38px] w-full rounded-md border border-input bg-background px-3 text-sm placeholder:text-subtle focus:outline-none focus:ring-2 focus:ring-ring/30",
         className,
@@ -60,9 +61,9 @@ export function Select({ className, children, ...props }: SelectHTMLAttributes<H
   );
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
   return (
-    <label className="flex flex-col gap-1.5 text-sm">
+    <label className={cn("flex flex-col gap-1.5 text-sm", className)}>
       <span>{label}</span>
       {children}
     </label>
@@ -110,6 +111,7 @@ export function Modal({
   onClose,
   title,
   subtitle,
+  eyebrow,
   children,
   footer,
   size = "md",
@@ -117,6 +119,7 @@ export function Modal({
   open: boolean;
   onClose: () => void;
   title: string;
+  eyebrow?: string;
   subtitle?: string;
   children: ReactNode;
   footer?: ReactNode;
@@ -131,30 +134,31 @@ export function Modal({
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-6 animate-in fade-in" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-overlay p-4 animate-in fade-in" onMouseDown={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
         onMouseDown={(e) => e.stopPropagation()}
         className={cn(
-          "flex max-h-[calc(100vh-4rem)] w-full flex-col rounded-md bg-card shadow-2xl animate-in zoom-in-95",
+          "flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-lg bg-card shadow-2xl animate-in zoom-in-95",
           size === "sm" && "max-w-md",
-          size === "md" && "max-w-2xl",
+          size === "md" && (eyebrow ? "max-w-3xl" : "max-w-2xl"),
           size === "lg" && "max-w-5xl",
         )}
       >
         <div className="flex items-start justify-between border-b border-border px-6 py-5">
           <div>
-            <h2 className="text-base font-semibold uppercase tracking-wide">{title}</h2>
+            {eyebrow && <div className="mb-0.5 text-xs uppercase tracking-wider text-neutral-500">{eyebrow}</div>}
+            <h2 className={cn("text-base font-semibold text-neutral-900", !eyebrow && "uppercase tracking-wide")}>{title}</h2>
             {subtitle && <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>}
           </div>
           <button aria-label="Закрыть" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-accent">
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="thin-scroll flex-1 overflow-y-auto px-6 py-5">{children}</div>
-        {footer && <div className="flex items-center justify-between gap-2 border-t border-border px-6 py-4">{footer}</div>}
+        <div className="thin-scroll min-h-0 flex-1 overflow-y-auto px-6 py-5">{children}</div>
+        {footer && <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-6 py-4">{footer}</div>}
       </div>
     </div>
   );

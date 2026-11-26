@@ -2,9 +2,10 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { ArrowLeft, Save, RefreshCw } from "lucide-react";
-import { Button, Field, Input, PageHeader, Panel } from "@/components/ui-kit";
+import { Button, Input, Modal } from "@/components/ui-kit";
 import { PasswordGate } from "@/components/PasswordGate";
-import { apiGetVehicleDetails, apiPutVehicleDetails, type VehicleDetails } from "@/lib/api";
+import { apiGetVehicleDetails, apiPutVehicleDetails, ApiError, type VehicleDetails } from "@/lib/api";
+import { useAppState } from "@/lib/store";
 import { CARD_FIELDS, ABSENT } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -17,6 +18,32 @@ export const Route = createFileRoute("/card/$vehicleId")({
   ),
 });
 
+const passportRows: Record<string, string> = {
+  "Марка машины": "1",
+  "Паспорт (формуляр) машины": "2",
+  "Заводской номер": "3",
+  "Идентификационный номер (VIN)": "4",
+  "Номер шасси": "5",
+  "Номер кузова": "6",
+  "Номер кабины": "7",
+  "Номер кунга": "8",
+  "Номер корпуса": "9",
+  "Номер башни": "10",
+  "Марка двигателя": "11",
+  "Номер двигателя": "12",
+  "Специальное оборудование (марка, тип, номер)": "13",
+  "Марка установленных АКБ": "24",
+  "Количество АКБ": "25",
+  "Дата приведения (установки) АКБ": "26",
+  "Марка, модель и размер шин": "27",
+  "Количество шин": "28",
+  "Номера шин": "29",
+  "Наработка с начала эксплуатации": "30",
+  "Группа эксплуатации": "31",
+  "Подразделение": "32",
+  "Закрепленный водитель (механик-водитель)": "33"
+};
+
 function CardDetailPage() {
   const { vehicleId } = Route.useParams();
   const navigate = useNavigate();
@@ -24,12 +51,32 @@ function CardDetailPage() {
 
   const { data: details, isLoading, refetch } = useQuery({
     queryKey: ["vehicle-details", numVehicleId],
-    queryFn: () => apiGetVehicleDetails(numVehicleId),
+    queryFn: async (): Promise<VehicleDetails> => {
+      try {
+        return await apiGetVehicleDetails(numVehicleId);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          return {
+            vehicleId: numVehicleId,
+            certificate: null,
+            batteries: [],
+            tires: [],
+            maintenance: [],
+            history: [],
+          };
+        }
+        throw e;
+      }
+    },
   });
+
+  const vehicle = useAppState((s) => s.vehicles.find((v) => v.id === numVehicleId));
 
   const [edited, setEdited] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
+  const [editing, setEditing] = useState(false);
+  const [hideAbsent, setHideAbsent] = useState(false);
   const hasChanges = Object.keys(edited).length > 0;
 
   const handleSave = async () => {
@@ -60,6 +107,7 @@ function CardDetailPage() {
       await apiPutVehicleDetails(numVehicleId, updated);
       await refetch();
       setEdited({});
+      setEditing(false);
       toast.success("Карточка сохранена");
     } catch (error) {
       toast.error("Ошибка сохранения карточки");
@@ -70,97 +118,54 @@ function CardDetailPage() {
   };
 
   const getFieldValue = (field: string) => {
-    if (edited[field] !== undefined) return edited[field];
-    if (details?.certificate?.individualCardFields?.[field]) {
-      return details.certificate.individualCardFields[field];
-    }
-    return ABSENT;
+    const key = passportRows[field] ?? field;
+    if (edited[key] !== undefined) return edited[key];
+    const certificate = details?.certificate;
+    const fallback: Record<string, unknown> = {
+      "Марка машины": certificate?.brandModel || vehicle?.brand,
+      "Заводской номер": certificate?.factoryNumber,
+      "Идентификационный номер (VIN)": certificate?.vin,
+      "Номер шасси": certificate?.chassisNumber, "Номер кузова": certificate?.bodyNumber,
+      "Номер кабины": certificate?.cabinNumber, "Номер кунга": certificate?.kungNumber,
+      "Номер корпуса": certificate?.hullNumber, "Номер башни": certificate?.turretNumber,
+      "Марка двигателя": certificate?.engineBrand, "Номер двигателя": certificate?.engineNumber,
+      "Год выпуска": certificate?.yearOfManufacture || vehicle?.year || undefined,
+      "Государственный регистрационный знак": certificate?.regNumber || vehicle?.plate,
+      "Группа эксплуатации": certificate?.usageGroup || vehicle?.group,
+      "Подразделение": certificate?.subdivision || vehicle?.unit,
+      "Дата ввода в эксплуатацию": vehicle?.commissionDate,
+      "Закреплённый водитель": vehicle?.assignedTo
+    };
+    const values = [certificate?.individualCardFields?.[key], certificate?.individualCardFields?.[field], vehicle?.details[field], certificate?.extraFields?.find(item => item.name === field)?.value, fallback[field]];
+    return String(values.find(value => value != null && String(value).trim() && String(value).trim().toUpperCase() !== ABSENT) ?? "");
   };
 
   const handleFieldChange = (field: string, value: string) => {
     setEdited((prev) => ({
       ...prev,
-      [field]: value === ABSENT ? "" : value,
+      [passportRows[field] ?? field]: value === ABSENT ? "" : value,
     }));
   };
 
-  if (isLoading) {
-    return (
-      <div>
-        <PageHeader title="Индивидуальная карточка ВВСТ" />
-        <Panel className="p-6 text-center text-muted-foreground">Загрузка...</Panel>
+  const close = () => navigate({ to: "/card" });
+  return <Modal open onClose={close} size="lg" title="Индивидуальная карточка ВВСТ"
+    subtitle={[vehicle?.brand, vehicle?.plate].filter(Boolean).join(" · ")}
+    footer={editing ? <><Button variant="outline" onClick={() => { setEdited({}); setEditing(false); }}>Отмена</Button><Button disabled={saving || !hasChanges} onClick={handleSave}>Сохранить</Button></> : <Button disabled={!details} onClick={() => setEditing(true)}>Редактировать</Button>}>
+    {isLoading ? "Загрузка…" : !details ? "Не удалось загрузить карточку" : <>
+      <div className="border border-neutral-300 py-3 text-center text-sm">
+        <div className="eyebrow">Учётная карточка</div>
+        <div className="mt-1 font-semibold">{vehicle?.brand}</div>
+        Государственный регистрационный знак: {vehicle?.plate}
       </div>
-    );
-  }
-
-  if (!details) {
-    return (
-      <div>
-        <PageHeader title="Индивидуальная карточка ВВСТ" />
-        <Panel className="p-6 text-center text-muted-foreground">Карточка не найдена</Panel>
-      </div>
-    );
-  }
-
-  const certificate = details.certificate;
-  const cardFields = certificate?.individualCardFields || {};
-
-  return (
-    <div>
-      <PageHeader
-        title="ИНДИВИДУАЛЬНАЯ КАРТОЧКА ВВСТ"
-        subtitle={certificate ? `${certificate.brandModel}, ${certificate.regNumber}` : "Данные паспорта"}
-        actions={
-          <>
-            <Button variant="outline" onClick={() => refetch()} disabled={isLoading}>
-              <RefreshCw className={cn("mr-2 h-4 w-4", isLoading && "animate-spin")} />
-              Обновить
-            </Button>
-            <Button onClick={handleSave} disabled={!hasChanges || saving}>
-              <Save className="mr-2 h-4 w-4" />
-              Сохранить
-            </Button>
-          </>
-        }
-      />
-
-      <div className="mb-4">
-        <Link to="/card">
-          <Button variant="ghost" size="sm">
-            <ArrowLeft className="mr-2 h-4 w-4" />
-            Назад к списку
-          </Button>
-        </Link>
-      </div>
-
-      <Panel className="p-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {CARD_FIELDS.map((field) => {
-            const value = getFieldValue(field);
-            const isEdited = edited[field] !== undefined;
-            const isAbsent = value === ABSENT || value === "";
-
-            return (
-              <Field key={field} label={field}>
-                <Input
-                  value={isAbsent ? ABSENT : value}
-                  onChange={(e) => handleFieldChange(field, e.target.value)}
-                  className={cn(
-                    isAbsent && "text-muted-foreground",
-                    isEdited && "border-warning bg-warning-soft",
-                  )}
-                />
-              </Field>
-            );
-          })}
-        </div>
-      </Panel>
-
-      {hasChanges && (
-        <div className="mt-4 text-sm text-muted-foreground">
-          Есть несохранённые изменения ({Object.keys(edited).length})
-        </div>
-      )}
-    </div>
-  );
+      <div className="my-3 flex justify-end"><Button variant="outline" aria-pressed={hideAbsent} onClick={() => setHideAbsent(!hideAbsent)}>{hideAbsent ? "Показать отсутствующее" : "Скрыть отсутствующее"}</Button></div>
+      <table className="w-full border-collapse text-sm [&_td]:border [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:px-3 [&_th]:py-2">
+        <thead className="bg-neutral-100 text-left text-xs uppercase text-neutral-600"><tr><th>№</th><th>Наименование данных</th><th>Сведения</th></tr></thead>
+        <tbody>{Array.from(new Set([...CARD_FIELDS, ...Object.keys(passportRows)])).map((field, i) => {
+          const value = getFieldValue(field) || (field === "Марка машины" ? vehicle?.brand : "") || "";
+          if (hideAbsent && !value.trim() && !editing) return null;
+          return <tr key={field} className="even:bg-neutral-50"><td className="w-14 text-center text-neutral-500">{i + 1}</td><td className="w-2/5">{field}</td><td>{editing ? <Input aria-label={field} value={value} onChange={e => handleFieldChange(field, e.target.value)} /> : value || ABSENT}</td></tr>;
+        })}</tbody>
+      </table>
+    </>}
+  </Modal>;
 }

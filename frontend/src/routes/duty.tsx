@@ -1,254 +1,66 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Edit, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
-import { Button, Field, Input, Modal, PageHeader, Panel } from "@/components/ui-kit";
-import { apiGetCollection, apiPutCollection } from "@/lib/api";
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Button, Field, Input, Panel } from "@/components/ui-kit";
+import { apiGetCollection, apiSaveMileage } from "@/lib/api";
+import { setState, useAppState } from "@/lib/store";
+import { vehicleFromDto } from "@/lib/backendMap";
+import type { JournalEntry, VehicleDto } from "@/lib/types";
 import { toast } from "sonner";
 
-interface JournalDuty {
-  id: number;
-  date: string;
-  name: string;
+export const Route = createFileRoute("/duty")({ component: DutyPage });
+const hourField = "Текущие показания МОТОЧАСОВ";
+function hoursOf(vehicle?: VehicleDto) {
+  const value = vehicle?.passportData?.find(p => p.header === hourField)?.value;
+  if (value == null || String(value).trim() === "") return null;
+  const hours = Number(String(value).replace(",", "."));
+  return Number.isFinite(hours) ? hours : null;
 }
 
-export const Route = createFileRoute("/duty")({
-  component: DutyPage,
-});
-
 function DutyPage() {
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(8); // September (0-indexed)
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<JournalDuty | null>(null);
-  const [formData, setFormData] = useState<Partial<JournalDuty>>({});
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
-
-  const queryClient = useQueryClient();
-
-  const { data: duties = [], isLoading } = useQuery({
-    queryKey: ["journal-duty"],
-    queryFn: () => apiGetCollection<JournalDuty>("journal-duty"),
-  });
-
-  const saveMutation = useMutation({
-    mutationFn: async (data: JournalDuty[]) => {
-      return apiPutCollection("journal-duty", data);
+  const vehicles = useAppState(s => s.vehicles);
+  const [query, setQuery] = useState("");
+  const [selected, select] = useState<number>();
+  const [km, setKm] = useState("");
+  const [hours, setHours] = useState("");
+  const [date, setDate] = useState(new Date().toLocaleDateString("sv-SE"));
+  const shown = vehicles.filter(v => (v.brand + " " + v.plate).toLowerCase().includes(query.trim().toLowerCase()));
+  const vehicle = vehicles.find(v => v.id === selected);
+  const startHours = hoursOf(vehicle?.rawDto);
+  const kmDiff = vehicle && km ? Number(km) - vehicle.mileage : null;
+  const hoursDiff = startHours !== null && hours ? Number(hours) - startHours : null;
+  const client = useQueryClient();
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!vehicle || !date || (!km && !hours)) throw Error("Введите конечные показания");
+      const [fleet, journal, history] = await Promise.all([apiGetCollection<VehicleDto>("vehicles"), apiGetCollection<JournalEntry>("journal"), apiGetCollection("exploitation")]);
+      const current = fleet.find(v => v.id === vehicle.id);
+      if (!current || current.currentMileage !== vehicle.mileage || hoursOf(current) !== startHours) throw Error("Показания изменились. Обновите страницу.");
+      if (km && (!Number.isInteger(Number(km)) || Number(km) < current.currentMileage) || hours && (!Number.isFinite(Number(hours)) || Number(hours) < (startHours ?? 0))) throw Error("Проверьте конечные показания");
+      const updated = { ...current, currentMileage: km ? Number(km) : current.currentMileage, passportData: [...(current.passportData ?? [])] };
+      if (hours) {
+        const index = updated.passportData.findIndex(p => p.header === hourField);
+        const previous = updated.passportData[index];
+        if (previous) updated.passportData[index] = { ...previous, value: Number(hours) };
+        else updated.passportData.push({ header: hourField, value: Number(hours), column: Math.max(0, ...updated.passportData.map(p => p.column)) + 1 });
+      }
+      const next = fleet.map(v => v.id === updated.id ? updated : v);
+      const record = { date, vehicleId: updated.id, km: kmDiff ?? 0, ...(hoursDiff === null ? {} : { engineHours: hoursDiff }) };
+      await apiSaveMileage({ vehicles: next, journal, exploitation: kmDiff || hoursDiff ? [...history, record] : history });
+      return next;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["journal-duty"] });
-      setModalOpen(false);
-      setEditingItem(null);
-      setFormData({});
-      toast.success("Сохранено");
-    },
-    onError: () => {
-      toast.error("Ошибка сохранения");
-    },
+    onSuccess: fleet => { setState(s => ({ ...s, vehicles: fleet.map(vehicleFromDto) })); client.invalidateQueries({ queryKey: ["exploitation"] }); setKm(""); setHours(""); toast.success("Показания сохранены"); },
+    onError: e => toast.error(e.message),
   });
-
-  const prevMonth = () => {
-    if (currentMonth === 0) {
-      setCurrentYear(currentYear - 1);
-      setCurrentMonth(11);
-    } else {
-      setCurrentMonth(currentMonth - 1);
-    }
-  };
-
-  const nextMonth = () => {
-    if (currentMonth === 11) {
-      setCurrentYear(currentYear + 1);
-      setCurrentMonth(0);
-    } else {
-      setCurrentMonth(currentMonth + 1);
-    }
-  };
-
-  const MONTHS = [
-    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
-  ];
-
-  const filteredDuties = duties.filter((d) => {
-    const date = new Date(d.date);
-    return date.getFullYear() === currentYear && date.getMonth() === currentMonth;
-  });
-
-  const handleAdd = () => {
-    setEditingItem(null);
-    setFormData({
-      date: `${currentYear}-${String(currentMonth + 1).padStart(2, "0")}-01`,
-      name: "",
-    });
-    setModalOpen(true);
-  };
-
-  const handleEdit = (item: JournalDuty) => {
-    setEditingItem(item);
-    setFormData(item);
-    setModalOpen(true);
-  };
-
-  const handleDelete = (id: number) => {
-    setDeleteTarget(id);
-    setDeleteOpen(true);
-  };
-
-  const performDelete = () => {
-    if (deleteTarget === null) return;
-    const updated = duties.filter((d) => d.id !== deleteTarget);
-    saveMutation.mutate(updated);
-    setDeleteOpen(false);
-    setDeleteTarget(null);
-  };
-
-  const handleSave = () => {
-    if (!formData.date || !formData.name) {
-      toast.error("Заполните обязательные поля");
-      return;
-    }
-
-    const newItem: JournalDuty = {
-      id: editingItem?.id || Date.now(),
-      date: formData.date,
-      name: formData.name,
-    };
-
-    let updated: JournalDuty[];
-    if (editingItem) {
-      updated = duties.map((d) => (d.id === editingItem.id ? newItem : d));
-    } else {
-      updated = [...duties, newItem];
-    }
-
-    saveMutation.mutate(updated);
-  };
-
-  return (
-    <div>
-      <PageHeader
-        title="Дежурный по парку"
-        subtitle={`${MONTHS[currentMonth]} ${currentYear}`}
-        actions={
-          <Button onClick={handleAdd}>
-            <Plus className="mr-2 h-4 w-4" />
-            Добавить дежурство
-          </Button>
-        }
-      />
-
-      <Panel className="mb-4 flex items-center gap-2 p-3">
-        <Button variant="outline" size="icon" onClick={prevMonth}>
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-        <span className="min-w-[160px] text-center text-sm">
-          {MONTHS[currentMonth]} {currentYear}
-        </span>
-        <Button variant="outline" size="icon" onClick={nextMonth}>
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      </Panel>
-
-      <Panel className="thin-scroll max-h-[calc(100vh-20rem)] overflow-auto">
-        <table className="w-full border-collapse text-sm">
-          <thead className="sticky top-0 z-10 bg-muted">
-            <tr className="border-b border-border">
-              <th className="px-3 py-3 text-left">Дата</th>
-              <th className="px-3 py-3 text-left">Дежурный</th>
-              <th className="w-24 px-3 py-3 text-center">Действия</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredDuties.length === 0 ? (
-              <tr>
-                <td colSpan={3} className="py-20 text-center text-muted-foreground">
-                  В этом месяце дежурств нет
-                </td>
-              </tr>
-            ) : (
-              filteredDuties
-                .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-                .map((item) => (
-                  <tr key={item.id} className="border-b border-border">
-                    <td className="px-3 py-3">{item.date}</td>
-                    <td className="px-3 py-3">{item.name}</td>
-                    <td className="px-3 py-3 text-center">
-                      <div className="flex justify-center gap-2">
-                        <button
-                          className="text-muted-foreground hover:text-foreground"
-                          onClick={() => handleEdit(item)}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </button>
-                        <button
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={() => handleDelete(item.id)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-            )}
-          </tbody>
-        </table>
-      </Panel>
-
-      <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title={editingItem ? "Редактировать дежурство" : "Добавить дежурство"}
-        size="md"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setModalOpen(false)}>
-              Отмена
-            </Button>
-            <Button onClick={handleSave} disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? "Сохранение..." : "Сохранить"}
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          <Field label="Дата">
-            <Input
-              type="date"
-              value={formData.date || ""}
-              onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-            />
-          </Field>
-          <Field label="Дежурный">
-            <Input
-              value={formData.name || ""}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              placeholder="ФИО дежурного"
-            />
-          </Field>
-        </div>
-      </Modal>
-
-      <Modal
-        open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
-        title="Подтверждение удаления"
-        size="sm"
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
-              Отмена
-            </Button>
-            <Button variant="danger" onClick={performDelete}>
-              Удалить
-            </Button>
-          </>
-        }
-      >
-        <p className="text-sm">Вы уверены, что хотите удалить это дежурство? Это действие нельзя отменить.</p>
-      </Modal>
-    </div>
-  );
+  return <Panel className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden rounded-lg">
+    <header className="border-b px-6 py-4"><div className="eyebrow">Учёт показаний пробега и моточасов</div><h1 className="mt-1 font-semibold">Дежурный по парку</h1></header>
+    <div className="flex min-h-0 flex-1"><aside className="flex w-[min(340px,38%)] flex-col border-r"><div className="border-b p-4"><Input aria-label="Поиск машины" placeholder="Поиск по марке или гос. номеру..." value={query} onChange={e => setQuery(e.target.value)} /></div><div className="overflow-auto">{shown.map(v => <button key={v.id} disabled={save.isPending} onClick={() => { select(v.id); setKm(""); setHours(""); }} className={"block w-full border-b border-l-2 px-4 py-3 text-left text-sm " + (selected === v.id ? "border-l-neutral-900 bg-neutral-100" : "border-l-transparent")}>{v.brand}<span className="block text-xs text-neutral-500">{v.plate}</span></button>)}</div></aside>
+      <main className="flex-1 overflow-auto p-6">{vehicle ? <fieldset disabled={save.isPending} className="max-w-md space-y-4"><Field label="Дата выезда"><Input type="date" value={date} onChange={e => setDate(e.target.value)} /></Field>
+        <Field label="Начальный километраж"><Input readOnly value={vehicle.mileage.toLocaleString("ru-RU") + " км"} /></Field>
+        <Field label="Начальные моточасы"><Input readOnly value={startHours ?? "Не указано"} /></Field>
+        <Field label="Конечный километраж"><Input type="number" min={vehicle.mileage} value={km} onChange={e => setKm(e.target.value)} /></Field>
+        <Field label="Конечные моточасы"><Input type="number" step="any" min={startHours ?? 0} value={hours} onChange={e => setHours(e.target.value)} /></Field>
+        <Field label="Пройдено за день"><Input readOnly value={kmDiff ?? "—"} /></Field><Field label="Отработано моточасов"><Input readOnly value={hoursDiff ?? "—"} /></Field>
+        <div className="text-right"><Button disabled={(!hours && !km) || !date || (kmDiff ?? 0) < 0 || (hoursDiff ?? 0) < 0} onClick={() => save.mutate()}>Применить</Button></div></fieldset> : "Выберите машину"}</main></div>
+  </Panel>;
 }

@@ -40,8 +40,8 @@ function getDayOfWeek(year: number, month: number, day: number): number {
 }
 
 export function SchedulePage({ kind, title, subtitle, collectionName, columns }: SchedulePageProps) {
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(8); // September (0-indexed)
+  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [dayRangeStart, setDayRangeStart] = useState(1);
   const [dayRangeEnd, setDayRangeEnd] = useState(10);
   const [modalOpen, setModalOpen] = useState(false);
@@ -50,6 +50,8 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
   const queryClient = useQueryClient();
 
   const { data: items = [], isLoading } = useQuery({
@@ -118,15 +120,15 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
       date: formData.date || `${currentYear}-${String(currentMonth + 1).padStart(2, "0")}-01`,
       title: formData.title || "",
       location: formData.location || "",
-      route: formData.route,
+      route: formData.route ?? "",
       requiredBrand: formData.requiredBrand || "",
       requiredQuantity: formData.requiredQuantity || 1,
       startTime: formData.startTime || "09:00",
       endTime: formData.endTime || "10:00",
       instructor: formData.instructor || "",
-      teacher: formData.teacher,
-      scheduleRowId: formData.scheduleRowId,
-      scheduleDates: formData.scheduleDates,
+      teacher: formData.teacher ?? "",
+      ...(formData.scheduleRowId ? { scheduleRowId: formData.scheduleRowId } : {}),
+      ...(formData.scheduleDates ? { scheduleDates: formData.scheduleDates } : {}),
     };
 
     let updated: ScheduleItem[];
@@ -142,33 +144,56 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
   const handleExcelImport = async (file: File) => {
     try {
       const rows = await readExcelRows(file);
+      const toIso = (d: string) => {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        const m = d.trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
+        if (!m?.[1] || !m[2] || !m[3]) return d;
+        const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+        return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+      };
       const imported: ScheduleItem[] = rows
-        .map((row, index) => {
-          const title = pickString(row, "Название", "Наименование", "Название занятия", "Название мероприятия");
-          const location = pickString(row, "Место", "Локация", "Место проведения");
+        .map((row, index): ScheduleItem | null => {
+          const discipline = pickString(row, "Наименование учебной дисциплины", "Дисциплина");
+          const lessonType = pickString(row, "Вид занятия", "Тип занятия");
+          const title = pickString(row, "Название", "Наименование", "Название занятия", "Название мероприятия", "Вид перевозок", "Вид мероприятия", "Вид занятия") ||
+            (discipline ? `${discipline}${lessonType ? ` (${lessonType})` : ""}` : "");
+          const audience = pickString(row, "№ аудитории", "Аудитория", "Кабинет");
+          const dept = pickString(row, "Кафедра");
+          const group = pickString(row, "Наименование учебной группы", "Учебная группа", "Группа");
+          const location =
+            pickString(row, "Место", "Локация", "Место проведения", "Место проведения занятия", "Место перевозок") ||
+            [audience ? `ауд. ${audience}` : "", dept, group].filter(Boolean).join(", ");
           const brand = pickString(row, "Марка", "Марка машины", "Машина");
           const quantity = parseInt(pickString(row, "Количество", "Кол-во", "Количество машин")) || 1;
-          const date = pickString(row, "Дата", "Дата проведения");
+          const date = toIso(pickString(row, "Дата", "Дата проведения"));
           const startTime = pickString(row, "Время начала", "Начало", "Время");
           const endTime = pickString(row, "Время окончания", "Конец", "Время конца");
           const instructor = pickString(row, "Преподаватель", "Инструктор", "Старший колонны");
 
-          if (!title || !location) return null;
+          if (!title) return null;
+          const dates = Object.entries(row).flatMap(([header, value]) => {
+            if (!String(value ?? "").trim()) return [];
+            const key = header.trim();
+            const candidate = /^\d{1,2}$/.test(key) && Number(key) >= 1 && Number(key) <= daysInMonth
+              ? monthPrefix + "-" + key.padStart(2, "0") : toIso(key);
+            return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? [candidate] : [];
+          });
+          const firstDate = dates[0] ?? date;
+          if (!firstDate) return null;
 
           return {
             id: Date.now() + index,
-            date: date || `${currentYear}-${String(currentMonth + 1).padStart(2, "0")}-01`,
+            date: firstDate,
             title,
             location,
-            route: "",
+            route: group,
             requiredBrand: brand,
             requiredQuantity: quantity,
             startTime: startTime || "09:00",
             endTime: endTime || "10:00",
             instructor,
             teacher: "",
-            scheduleRowId: undefined,
-            scheduleDates: undefined,
+            scheduleDates: dates.length ? dates : [firstDate],
           };
         })
         .filter((item): item is ScheduleItem => item !== null);
@@ -186,6 +211,8 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
     }
   };
 
+  const monthPrefix = currentYear + "-" + String(currentMonth + 1).padStart(2, "0");
+  const monthItems = items.filter(item => [item.date, ...(item.scheduleDates ?? [])].some(date => date.startsWith(monthPrefix)));
   const daysInMonth = getDaysInMonth(currentYear, currentMonth + 1);
   const dayRangeEndClamped = Math.min(dayRangeEnd, daysInMonth);
 
@@ -236,35 +263,36 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
     <div>
       <PageHeader
         title={title}
-        subtitle={`${subtitle}: ${items.length}`}
-        actions={
-          <>
-            <Button variant="outline" onClick={() => document.getElementById("excel-upload")?.click()}>
-              <Download className="mr-2 h-4 w-4" />
+        subtitle={`${subtitle}: ${monthItems.length}`}
+      />
+
+      <Modal open={importOpen} onClose={() => setImportOpen(false)} title="Импорт из Excel" eyebrow="Расписание"
+        footer={<><Button variant="outline" onClick={() => setImportOpen(false)}>Отмена</Button>
+          <Button disabled={!importFile} onClick={() => { if (importFile) { setImportOpen(false); void handleExcelImport(importFile); } }}>{importFile ? "Импортировать" : "Импортировать (0)"}</Button></>}>
+        <div className="space-y-5">
+          <div className="rounded-md border border-neutral-200 bg-neutral-50 p-4">
+            <div className="mb-2 text-xs uppercase tracking-wider text-neutral-500">Формат файла</div>
+            <p className="text-sm text-neutral-700">Выберите таблицу Excel с записями расписания.</p>
+          </div>
+          <label className="block"><span className="mb-2 block text-xs uppercase tracking-wider text-neutral-500">Выбор файла</span>
+            <span className="relative block rounded-md border border-dashed border-neutral-300 bg-white px-4 py-3 text-center text-sm text-neutral-700 hover:bg-neutral-50 focus-within:ring-2">
+              {importFile ? "Заменить файл Excel" : "Выберите файл Excel (.xlsx)"}
+              <input type="file" accept=".xlsx,.xls" className="absolute inset-0 w-full cursor-pointer opacity-0" onChange={e => setImportFile(e.target.files?.[0] ?? null)} />
+            </span>
+          </label>
+        </div>
+      </Modal>
+
+      <Panel className="mb-4 flex flex-col items-end gap-2 rounded-lg p-3">
+        <div className="flex gap-2">
+            <Button variant="outline" onClick={() => { setImportFile(null); setImportOpen(true); }}>
               Импорт Excel
             </Button>
-            <input
-              id="excel-upload"
-              type="file"
-              accept=".xlsx,.xls"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) {
-                  handleExcelImport(file);
-                  e.target.value = "";
-                }
-              }}
-            />
             <Button onClick={handleAdd}>
               <Plus className="mr-2 h-4 w-4" />
               {kind === "oup" ? "Добавить занятие" : "Добавить мероприятие"}
             </Button>
-          </>
-        }
-      />
-
-      <Panel className="mb-4 flex flex-wrap items-center gap-4 p-3">
+          </div>
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">МЕСЯЦ</span>
           <Button variant="outline" size="icon" onClick={prevMonth}>
@@ -291,9 +319,9 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
         </div>
       </Panel>
 
-      <Panel className="thin-scroll max-h-[calc(100vh-20rem)] overflow-auto">
+      <Panel className="thin-scroll min-h-[calc(100vh-19rem)] overflow-auto">
         <table className="w-full border-collapse text-sm">
-          <thead className="sticky top-0 z-10 bg-muted">
+          <thead className="sticky top-0 z-10 bg-neutral-50 text-[10px] uppercase text-neutral-500 [&_th]:font-normal">
             <tr className="border-b border-border">
               <th className="w-12 px-3 py-3">
                 <input type="checkbox" aria-label="Выбрать все" />
@@ -312,14 +340,14 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
             </tr>
           </thead>
           <tbody>
-            {items.length === 0 ? (
+            {monthItems.length === 0 ? (
               <tr>
                 <td colSpan={4 + (columns.instructor ? 1 : 0) + (columns.start ? 1 : 0) + visibleDays.length} className="py-20 text-center text-muted-foreground">
                   {kind === "oup" ? "В этом месяце занятий нет" : "В этом месяце мероприятий нет"}
                 </td>
               </tr>
             ) : (
-              items.map((item) => (
+              monthItems.map((item) => (
                 <tr key={item.id} className="border-b border-border">
                   <td className="px-3 py-3 text-center">
                     <input type="checkbox" aria-label={`Выбрать ${item.title}`} />
@@ -351,7 +379,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
                   {columns.start && <td className="px-3 py-3">{item.startTime}</td>}
                   {visibleDays.map(({ day }) => (
                     <td key={day} className="px-2 py-3 text-center">
-                      {/* Here you would check if the schedule has this date */}
+                      {[item.date, ...(item.scheduleDates ?? [])].includes(monthPrefix + "-" + String(day).padStart(2, "0")) ? "✓" : ""}
                     </td>
                   ))}
                 </tr>

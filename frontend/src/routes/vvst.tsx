@@ -17,6 +17,8 @@ import { getState, nextVehicleId, setState, updateVehicles, useAppState } from "
 import type { Vehicle, VehicleType, WriteOffKind } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+const columnWidths = [76, 160, 160, 96, 208, 240, 240, 240];
+
 export const Route = createFileRoute("/vvst")({
   head: () => ({
     meta: [
@@ -274,7 +276,7 @@ function VvstPage() {
                 />
               </th>
               {PASSPORT_HEADERS.map((label, i) => (
-                <th key={i} className="min-w-[120px] max-w-[120px] px-2 py-2 text-left align-top text-xs font-normal">
+                <th key={i} style={{ width: columnWidths[i] ?? 160 }} className={cn("px-2 py-3 align-middle text-xs font-normal tracking-wide text-neutral-500", i < 5 ? "text-left" : "text-center")}>
                   <span className="block text-[10px] text-muted-foreground">№ {i + 1}</span>
                   {label}
                 </th>
@@ -283,7 +285,7 @@ function VvstPage() {
           </thead>
           <tbody>
             {rows.map(({ v, cells }) => (
-              <tr key={v.id} className={cn("border-b border-border", selected.has(v.id) && "bg-accent")}>
+              <tr key={v.id} className={cn("border-b border-neutral-100", selected.has(v.id) ? "bg-accent" : "even:bg-neutral-50")}>
                 <td className="px-3 py-2 text-center align-top">
                   <input
                     type="checkbox"
@@ -308,7 +310,8 @@ function VvstPage() {
                   return (
                     <td
                       key={col}
-                      className={cn("min-w-[120px] max-w-[120px] px-2 py-2 align-top text-xs", edited && "bg-warning-soft")}
+                      style={{ width: columnWidths[col] ?? 160, maxWidth: columnWidths[col] ?? 160 }}
+                      className={cn("px-2 py-2 align-middle text-sm", col >= 5 && "text-center", edited && "bg-warning-soft")}
                     >
                       {isEditing ? (
                         <Input
@@ -423,14 +426,14 @@ function VvstPage() {
               Отмена
             </Button>
             <Button onClick={importExcel} disabled={!importFile}>
-              Импортировать {importFile ? `(${importFile.name})` : "(0)"}
+              Импортировать
             </Button>
           </>
         }
       >
-        <div className="flex flex-col gap-3">
-          <div className="rounded bg-muted p-3 text-xs text-muted-foreground">
-            <p className="mb-2 font-semibold text-foreground">ФОРМАТ ФАЙЛА</p>
+        <div className="flex flex-col gap-5">
+          <div className="rounded-md border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+            <p className="mb-2 text-xs uppercase tracking-wider text-neutral-500">Формат файла</p>
             <p className="mb-2">
               Поддерживаются шаблон паспорта АБТС и электронный паспорт (формуляр). Поля транспортного средства сохраняются в таблице, а распознанные поля (год выпуска, VIN, номера кузова, шасси и двигателя) также заносятся в СРТС.
             </p>
@@ -443,19 +446,24 @@ function VvstPage() {
             Обновлять существующие машины (по гос. номеру)
           </label>
           <p className="text-xs text-muted-foreground">
-            Для обновления паспорта удалять машины по нужно. Обновление по госномеру сохраняет идентификаторы и связи с историей. Формулы загружаются из нового Excel-файла.
+            Для обновления паспорта удалять машины не нужно. Обновление по госномеру сохраняет идентификаторы и связи с историей. Формулы загружаются из нового Excel-файла.
           </p>
-          <Field label="ВЫБОР ФАЙЛА">
-            <input
-              type="file"
-              accept=".xlsx,.xls"
-              className="w-full text-sm"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                setImportFile(f ?? null);
-              }}
-            />
-          </Field>
+          <div className="space-y-2">
+            <div className="text-xs uppercase tracking-wider text-neutral-500">Выбор файла</div>
+            <label className="relative flex w-full cursor-pointer items-center justify-center rounded-md border border-dashed border-neutral-300 bg-white px-4 py-3 text-sm text-neutral-700 hover:bg-neutral-50 focus-within:ring-2">
+              {importFile ? "Заменить файл Excel" : "Выберите файл .xlsx или .xls…"}
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                aria-label="Выбор файла Excel"
+                className="absolute inset-0 w-full cursor-pointer opacity-0"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  setImportFile(f ?? null);
+                }}
+              />
+            </label>
+          </div>
         </div>
       </Modal>
 

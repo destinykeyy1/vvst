@@ -14,7 +14,9 @@ export async function readExcelRows(file: File): Promise<Record<string, unknown>
   if (!first) return [];
   const sheet = book.Sheets[first];
   if (!sheet) return [];
-  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "", raw: false, blankrows: true });
+  const header = rows.findIndex(row => row.some(cell => /^(?:вид занятия|вид перевозок|вид мероприятия|название занятия|название мероприятия|дисциплина)$/i.test(String(cell).trim())));
+  return XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false, ...(header >= 0 ? { range: header } : {}) });
 }
 
 export function pickString(row: Record<string, unknown>, ...keys: string[]): string {

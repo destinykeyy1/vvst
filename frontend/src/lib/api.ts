@@ -2,6 +2,8 @@
 // In dev the Vite server proxies /api to http://127.0.0.1:8000; in the
 // packaged app the backend serves the frontend itself, so paths are relative.
 
+import type { JournalEntry } from "./types";
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -54,6 +56,10 @@ export function apiGetCollection<T = unknown>(name: string) {
 
 export function apiPutCollection<T = unknown>(name: string, items: unknown[]) {
   return request<T[]>("PUT", `/api/${name}`, items);
+}
+
+export function apiJournalAction(action: unknown) {
+  return request<JournalEntry[]>("POST", "/api/journal/actions", action);
 }
 
 export type AccessScope = "orders" | "passport" | "general";
@@ -208,4 +214,8 @@ export interface ScheduleItem {
   teacher?: string;
   scheduleRowId?: number;
   scheduleDates?: string[];
+}
+
+export function apiSaveMileage(state: { vehicles: unknown[]; journal: unknown[]; exploitation: unknown[] }) {
+  return request("PUT", "/api/mileage-sync", state);
 }

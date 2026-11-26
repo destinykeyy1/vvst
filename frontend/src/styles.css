@@ -14,7 +14,7 @@
  */
 
 @theme inline {
-  --font-sans: "Segoe UI", "Open Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "Segoe UI", Tahoma, Arial, sans-serif;
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: calc(var(--radius) + 2px);
@@ -60,7 +60,7 @@
 :root {
   --radius: 0.25rem;
   --background: oklch(1 0 0);
-  --foreground: oklch(0.2 0 0);
+  --foreground: #1a1a1a;
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0 0);
   --popover: oklch(1 0 0);
@@ -88,7 +88,7 @@
   --border-strong: oklch(0.82 0 0);
   --input: oklch(0.86 0 0);
   --ring: oklch(0.4 0 0);
-  --overlay: oklch(0 0 0 / 45%);
+  --overlay: rgb(0 0 0 / 60%);
   --sidebar: oklch(0.19 0 0);
   --sidebar-foreground: oklch(0.86 0 0);
   --sidebar-muted: oklch(0.6 0 0);
@@ -108,17 +108,17 @@
   }
 
   body {
-    background-color: var(--color-background);
+    background-color: #f0f2f5;
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
   }
 }
 
 @utility page-title {
-  font-size: 1.25rem;
+  font-size: 1.125rem;
   line-height: 1.75rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 

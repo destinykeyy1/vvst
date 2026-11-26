@@ -137,7 +137,7 @@ function RootComponent() {
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <div className="flex min-h-screen">
         <AppSidebar />
-        <main className="min-w-0 flex-1 p-8">
+        <main className="min-w-0 flex-1 bg-white p-8">
           <Outlet />
         </main>
       </div>
