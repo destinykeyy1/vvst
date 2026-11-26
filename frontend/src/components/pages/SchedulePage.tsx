@@ -186,7 +186,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
             date: firstDate,
             title,
             location,
-            route: group,
+            route: kind === "oup" ? pickString(row, "Маршрут движения", "Маршрут") : group,
             requiredBrand: brand,
             requiredQuantity: quantity,
             startTime: startTime || "09:00",
