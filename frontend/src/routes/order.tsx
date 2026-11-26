@@ -42,21 +42,181 @@ export const Route = createFileRoute("/order")({
 
 function OrderRoute() {
   const { tab } = Route.useSearch();
-  return tab ? <OrderPage key={tab} /> : <OrderArchive />;
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Omsk" });
+    if (typeof window === "undefined") return today;
+    try {
+      const saved = window.localStorage.getItem("planner.orderDate");
+      return saved && /^\d{4}-\d{2}-\d{2}$/.test(saved) ? saved : today;
+    } catch {
+      return today;
+    }
+  });
+
+  function changeDate(date: string) {
+    setSelectedDate(date);
+    if (!date) return;
+    try {
+      window.localStorage.setItem("planner.orderDate", date);
+    } catch {
+      // The date stays available within the current page when storage is blocked.
+    }
+  }
+
+  return tab
+    ? <OrderPage key={tab} selectedDate={selectedDate} setSelectedDate={changeDate} />
+    : <OrderArchive />;
+}
+
+const ARCHIVE_COLUMNS = [
+  ["brand", "Марка машины"],
+  ["regNumber", "Государственный регистрационный знак"],
+  ["usageGroup", "Группа эксплуатации"],
+  ["purpose", "Для каких целей назначается машина"],
+  ["route", "Маршрут движения"],
+  ["responsible", "В чьё распоряжение"],
+  ["departureTime", "Время выезда"],
+  ["returnTime", "Время возвращения"],
+  ["note", "Примечание"],
+] as const;
+
+function archiveDate(date: string) {
+  return date.split("-").reverse().join(".");
+}
+
+function ArchiveTable({ lines, selected, onSelection }: {
+  lines: OrderLine[];
+  selected?: number[];
+  onSelection?: (ids: number[]) => void;
+}) {
+  const all = lines.length > 0 && lines.every(line => selected?.includes(line.id));
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[1080px] border-collapse text-left text-[13px] leading-5">
+        <thead className="bg-neutral-100/70 text-xs text-neutral-500">
+          <tr>
+            {onSelection && <th className="w-10 px-3 text-center">
+              <input type="checkbox" aria-label="Выбрать все строки" checked={all}
+                disabled={!lines.length} onChange={() => onSelection(all ? [] : lines.map(line => line.id))} />
+            </th>}
+            {ARCHIVE_COLUMNS.map(([field, label]) => (
+              <th key={field} scope="col" className={cn("px-3 py-3 font-semibold", field === "purpose" && "w-1/4")}>{label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map(line => (
+            <tr key={line.id} className="border-t border-neutral-100">
+              {onSelection && <td className="px-3 text-center align-middle">
+                <input type="checkbox" aria-label={`Выбрать строку ${line.id}`}
+                  checked={selected?.includes(line.id) ?? false}
+                  onChange={event => onSelection(event.target.checked
+                    ? [...(selected ?? []), line.id]
+                    : (selected ?? []).filter(id => id !== line.id))} />
+              </td>}
+              {ARCHIVE_COLUMNS.map(([field]) => (
+                <td key={field} className="whitespace-pre-wrap break-words px-3 py-2.5 align-middle">
+                  {field === "responsible" ? line.responsible || line.driver || "—" : line[field] || "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+          {!lines.length && <tr><td colSpan={ARCHIVE_COLUMNS.length + Number(Boolean(onSelection))}
+            className="px-4 py-8 text-center text-neutral-500">В черновике нет строк</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function OrderArchive() {
-  type Order = { id: number; orderNumber: string | number; date: string; lines: OrderLine[] };
+  type Order = OrderDraft & { orderNumber: string | number };
+  const client = useQueryClient();
   const drafts = useQuery({ queryKey: ["order-drafts"], queryFn: () => apiGetCollection<OrderDraft>("order-drafts") });
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => apiGetCollection<Order>("orders") });
-  const [opened, setOpened] = useState<OrderDraft | Order | null>(null);
-  return <div><PageHeader title="Наряд" subtitle="Подготовьте строки и подтвердите итоговую публикацию здесь." />
-    <h2 className="mb-3 text-sm font-semibold">Подготовленные наряды</h2>
-    <div className="rounded-lg border border-dashed p-8 text-center text-sm text-neutral-500">{drafts.isLoading ? "Загрузка…" : drafts.isError ? "Не удалось загрузить подготовленные наряды" : drafts.data?.length ? drafts.data.map(d => <p key={d.id}>Черновик от {d.date} · {d.lines.length} строк <Button variant="outline" onClick={() => setOpened(d)}>Открыть</Button></p>) : "Подготовленных нарядов пока нет. Перенесите строки из нужных подразделов."}</div>
-    <h2 className="mb-3 mt-8 text-sm font-semibold">Опубликованные наряды</h2>
-    {orders.isLoading && "Загрузка…"}{orders.isError && "Не удалось загрузить наряды"}
-    {orders.data?.map(order => <Panel key={order.id} className="mb-3 flex items-center justify-between rounded-lg p-4"><div className="text-sm"><strong>Наряд №{order.orderNumber} от {order.date.split("-").reverse().join(".")}</strong> <span className="rounded border px-2 text-xs">Опубликован</span><div className="mt-1 text-xs text-neutral-500">{order.lines.length} строк</div></div><Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button></Panel>)}
-    <Modal open={!!opened} onClose={() => setOpened(null)} title={opened && "orderNumber" in opened ? "Наряд №" + opened.orderNumber : "Черновик наряда"}><table className="w-full text-left text-sm"><thead><tr><th>Марка</th><th>Регистрационный знак</th></tr></thead><tbody>{opened?.lines.map((line,i) => <tr key={i}><td>{line.brand}</td><td>{line.regNumber}</td></tr>)}</tbody></table></Modal></div>;
+  const [opened, setOpened] = useState<Order | null>(null);
+  const [selected, setSelected] = useState<Record<number, number[]>>({});
+  const [deletion, setDeletion] = useState<{ id: number; ids?: number[] } | null>(null);
+  const remove = useMutation({
+    mutationFn: async ({ id, ids }: { id: number; ids?: number[] }) => {
+      const current = await apiGetCollection<OrderDraft>("order-drafts");
+      const updated = ids
+        ? current.map(draft => draft.id === id
+          ? { ...draft, lines: draft.lines.filter(line => !ids.includes(line.id)) }
+          : draft)
+        : current.filter(draft => draft.id !== id);
+      await apiPutCollection("order-drafts", updated);
+      return updated;
+    },
+    onSuccess: async (updated, { id }) => {
+      client.setQueryData(["order-drafts"], updated);
+      setSelected(previous => ({ ...previous, [id]: [] }));
+      setDeletion(null);
+      await client.invalidateQueries({ queryKey: ["order-drafts"] });
+      toast.success("Черновики обновлены");
+    },
+    onError: error => toast.error(error instanceof Error ? error.message : "Не удалось сохранить изменения"),
+  });
+  const summary = (lines: OrderLine[]) =>
+    `Строк: ${lines.length} · Подразделов: ${new Set(lines.map(line => line.section)).size}`;
+  return (
+    <div>
+      <PageHeader title="Наряд" subtitle="Подготовленные и опубликованные наряды" />
+      <h2 className="mb-3 text-sm font-semibold">Подготовленные наряды</h2>
+      {!drafts.data?.length && <div className="rounded-lg border border-dashed p-8 text-center text-sm text-neutral-500">
+        {drafts.isLoading ? "Загрузка…" : drafts.isError ? "Не удалось загрузить подготовленные наряды"
+          : "Подготовленных нарядов пока нет. Перенесите строки из нужных подразделов."}
+      </div>}
+      {drafts.data?.map(draft => {
+        const ids = draft.lines.filter(line => selected[draft.id]?.includes(line.id)).map(line => line.id);
+        return (
+          <Panel key={draft.id} className="mb-3 overflow-hidden rounded-lg">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
+              <div className="text-sm">
+                <strong>Наряд от {archiveDate(draft.date)}</strong>
+                <span className="ml-2 rounded border bg-neutral-100 px-2 py-0.5 text-xs">Подготовлен</span>
+                <div className="mt-1 text-xs text-neutral-500">{summary(draft.lines)}</div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="danger" disabled={!ids.length || remove.isPending} onClick={() => setDeletion({ id: draft.id, ids })}>
+                  Удалить выбранные ({ids.length})
+                </Button>
+                <Button variant="outline" disabled={remove.isPending} onClick={() => setDeletion({ id: draft.id })}>
+                  Удалить черновик
+                </Button>
+              </div>
+            </div>
+            <ArchiveTable lines={draft.lines} selected={ids}
+              onSelection={next => setSelected(previous => ({ ...previous, [draft.id]: next }))} />
+          </Panel>
+        );
+      })}
+      <h2 className="mb-3 mt-8 text-sm font-semibold">Опубликованные наряды</h2>
+      {orders.isLoading && <p className="text-sm text-neutral-500">Загрузка…</p>}
+      {orders.isError && <p className="text-sm text-neutral-500">Не удалось загрузить наряды</p>}
+      {orders.data?.slice().sort((a, b) => b.date.localeCompare(a.date)).map(order => (
+        <Panel key={order.id} className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg p-4">
+          <div className="text-sm">
+            <strong>Наряд №{order.orderNumber} от {archiveDate(order.date)}</strong>
+            <span className="ml-2 rounded border bg-neutral-50 px-2 py-0.5 text-xs">Опубликован</span>
+            <div className="mt-1 text-xs text-neutral-500">{summary(order.lines)}</div>
+          </div>
+          <Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button>
+        </Panel>
+      ))}
+      <Modal open={opened !== null} onClose={() => setOpened(null)} title={opened ? `Наряд №${opened.orderNumber}` : "Наряд"} size="lg">
+        {opened && <ArchiveTable lines={opened.lines} />}
+      </Modal>
+      <Modal open={deletion !== null} onClose={() => { if (!remove.isPending) setDeletion(null); }}
+        title={deletion?.ids ? "Удалить выбранные строки?" : "Удалить черновик?"} size="sm"
+        footer={<>
+          <Button variant="outline" disabled={remove.isPending} onClick={() => setDeletion(null)}>Отмена</Button>
+          <Button variant="danger" disabled={!deletion || remove.isPending} onClick={() => { if (deletion) remove.mutate(deletion); }}>Удалить</Button>
+        </>}>
+        <p className="text-sm">{deletion?.ids ? `Будет удалено строк: ${deletion.ids.length}.` : "Будут удалены все строки этого черновика."}</p>
+      </Modal>
+    </div>
+  );
 }
 
 type OrderDraft = { id: number; date: string; lines: OrderLine[] };
@@ -82,12 +242,12 @@ function overlaps(a: OrderLine, b: OrderLine) {
   return a.departureTime < b.returnTime && b.departureTime < a.returnTime;
 }
 
-function OrderPage() {
+function OrderPage({ selectedDate, setSelectedDate }: {
+  selectedDate: string;
+  setSelectedDate: (date: string) => void;
+}) {
   const { tab: activeTab = "duty" } = Route.useSearch();
 
-  const [selectedDate, setSelectedDate] = useState(() =>
-    new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Omsk" }),
-  );
   const [picking, setPicking] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const training = activeTab === "training";
@@ -380,11 +540,13 @@ function OrderPage() {
         await saveMutation.mutateAsync(displayedLines);
         setChanges({});
       }
-      await apiPutCollection("order-drafts", draft
+      const updatedDrafts = draft
         ? drafts.map(item => item.id === draft.id ? updated : item)
-        : [...drafts, updated]);
-      await queryClient.invalidateQueries({ queryKey: ["order-drafts"] });
-      toast.success("Строки перенесены в черновик наряда");
+        : [...drafts, updated];
+      await apiPutCollection("order-drafts", updatedDrafts);
+      queryClient.setQueryData(["order-drafts"], updatedDrafts);
+      void queryClient.invalidateQueries({ queryKey: ["order-drafts"] });
+      toast.success(`Строки на ${archiveDate(selectedDate)} перенесены в «Наряд». Завершите публикацию на общей странице.`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось перенести строки в наряд");
     } finally {

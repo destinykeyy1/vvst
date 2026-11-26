@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Download, Plus, Trash2, Edit, X } from "lucide-react";
 import { Button, Field, Input, Modal, PageHeader, Panel, Select } from "@/components/ui-kit";
 import { apiGetCollection, apiPutCollection, type ScheduleItem } from "@/lib/api";
-import { readExcelRows, pickString } from "@/lib/excel";
+import { pickString } from "@/lib/excel";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -39,6 +39,56 @@ function getDayOfWeek(year: number, month: number, day: number): number {
   return (date.getDay() + 6) % 7; // Monday = 0
 }
 
+function scheduleIsoDate(value: string) {
+  const input = value.trim();
+  const iso = input.match(/^(\d{4}-\d{2}-\d{2})(?:$|[T ])/);
+  const local = input.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
+  const formatted = iso?.[1] ?? (local
+    ? `${local[3].length === 2 ? "20" + local[3] : local[3]}-${local[2].padStart(2, "0")}-${local[1].padStart(2, "0")}`
+    : /^\d{5}$/.test(input)
+      ? new Date(Date.UTC(1899, 11, 30) + Number(input) * 86400000).toISOString().slice(0, 10)
+      : "");
+  if (!formatted || formatted.startsWith("0000-")) return null;
+  const date = new Date(formatted + "T00:00:00Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === formatted
+    ? formatted : null;
+}
+
+function scheduleGridRows(grid: unknown[][], date1904: boolean) {
+  const cellText = (value: unknown) => String(value ?? "").trim().replace(/\s+/g, " ");
+  const titles = new Set([
+    "вид перевозок", "вид занятия", "название", "наименование", "название мероприятия",
+    "наименование мероприятия", "название занятия", "вид мероприятия", "наименование учебной дисциплины",
+  ]);
+  const headerIndex = grid.findIndex(row => row.some(value => titles.has(cellText(value).toLowerCase())));
+  if (headerIndex < 0) {
+    throw new Error("Не найден заголовок «Вид перевозок», «Вид занятия» или «Наименование мероприятия».");
+  }
+
+  const headers = grid[headerIndex].map(value => {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 10000 && value <= 99999) {
+      const base = date1904 ? Date.UTC(1904, 0, 1) : Date.UTC(1899, 11, 30);
+      return new Date(base + value * 86400000).toISOString().slice(0, 10);
+    }
+    return cellText(value);
+  });
+  return grid.slice(headerIndex + 1).map(row => {
+    const entry: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      if (!header) return;
+      const value = row[index];
+      if (typeof value === "number" && value >= 0 && value < 1 &&
+          /^(начало|конец|время)/i.test(header)) {
+        const minutes = Math.round(value * 1440) % 1440;
+        entry[header] = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+      } else {
+        entry[header] = cellText(value);
+      }
+    });
+    return entry;
+  });
+}
+
 export function SchedulePage({ kind, title, subtitle, collectionName, columns }: SchedulePageProps) {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
@@ -52,6 +102,19 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
 
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
+  const [importRows, setImportRows] = useState<ScheduleItem[]>([]);
+  const [importError, setImportError] = useState("");
+  const [importReading, setImportReading] = useState(false);
+  const importVersion = useRef(0);
+  const importDates = importRows.flatMap(row => row.scheduleDates ?? [row.date]).sort();
+  const closeImport = () => {
+    importVersion.current++;
+    setImportOpen(false);
+    setImportFile(null);
+    setImportRows([]);
+    setImportError("");
+    setImportReading(false);
+  };
   const queryClient = useQueryClient();
 
   const { data: items = [], isLoading } = useQuery({
@@ -141,22 +204,39 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
     saveMutation.mutate(updated);
   };
 
-  const handleExcelImport = async (file: File) => {
+  const readImport = async (file: File) => {
+    const version = ++importVersion.current;
+    setImportFile(file);
+    setImportRows([]);
+    setImportError("");
+    setImportReading(true);
     try {
-      const rows = await readExcelRows(file);
-      const toIso = (d: string) => {
-        const iso = d.trim().match(/^(\d{4}-\d{2}-\d{2})(?:$|[T ])/);
-        if (iso) return iso[1];
-        const m = d.trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
-        if (!m?.[1] || !m[2] || !m[3]) return d;
-        const y = m[3].length === 2 ? `20${m[3]}` : m[3];
-        return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+      const { read, utils } = await import("xlsx");
+      const workbook = read(await file.arrayBuffer(), { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error("Книга Excel не содержит листов.");
+      const grid = utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
+      const rows = scheduleGridRows(grid, Boolean(workbook.Workbook?.WBProps?.date1904));
+      const columnDate = (header: string) => {
+        const key = header.trim();
+        return /^\d{1,2}$/.test(key)
+          ? scheduleIsoDate(monthPrefix + "-" + key.padStart(2, "0"))
+          : scheduleIsoDate(key);
       };
+      const normalizeTime = (value: string, fallback: string) => {
+        if (!value.trim()) return fallback;
+        const match = value.trim().match(/^(\d{1,2})[:.](\d{2})(?::\d{2})?$/);
+        if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
+          throw new Error(`Неверное время «${value}». Используйте 8.00 или 08:00.`);
+        }
+        return `${match[1].padStart(2, "0")}:${match[2]}`;
+      };
+      const importedStartId = Date.now();
       const imported: ScheduleItem[] = rows
         .map((row, index): ScheduleItem | null => {
           const discipline = pickString(row, "Наименование учебной дисциплины", "Дисциплина");
           const lessonType = pickString(row, "Вид занятия", "Тип занятия");
-          const title = pickString(row, "Название", "Наименование", "Название занятия", "Название мероприятия", "Вид перевозок", "Вид мероприятия", "Вид занятия") ||
+          const title = pickString(row, "Название", "Наименование", "Название занятия", "Название мероприятия", "Наименование мероприятия", "Вид перевозок", "Вид мероприятия", "Вид занятия") ||
             (discipline ? `${discipline}${lessonType ? ` (${lessonType})` : ""}` : "");
           const audience = pickString(row, "№ аудитории", "Аудитория", "Кабинет");
           const dept = pickString(row, "Кафедра");
@@ -166,7 +246,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
             [audience ? `ауд. ${audience}` : "", dept, group].filter(Boolean).join(", ");
           const brand = pickString(row, "Марка машин", "Марка машины", "Марка", "Машина", columns.brands);
           const quantity = Number.parseInt(pickString(row, "Количество машин", "Количество", "Кол-во"), 10);
-          const date = toIso(pickString(row, "Дата", "Дата проведения"));
+          const rawDate = pickString(row, "Дата", "Дата проведения");
           const startTime = pickString(row, "Начало занятий", "Время начала", "Начало", "Время", columns.start ?? "");
           const endTime = pickString(row, "Конец занятий", "Время окончания", "Конец", "Время конца");
           const instructor = pickString(row, "Преподаватель (старший колонны)", "Преподаватель", "Инструктор", "Старший колонны", columns.instructor ?? "");
@@ -175,36 +255,59 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
           const dates = Object.entries(row).flatMap(([header, value]) => {
             const mark = String(value ?? "").trim();
             if (!mark || /^(?:0+(?:[.,]0+)?|false|нет|[-–—]+)$/i.test(mark)) return [];
-            const key = header.trim();
-            const candidate = /^\d{1,2}$/.test(key) && Number(key) >= 1 && Number(key) <= daysInMonth
-              ? monthPrefix + "-" + key.padStart(2, "0") : toIso(key);
-            return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? [candidate] : [];
+            const candidate = columnDate(header);
+            return candidate ? [candidate] : [];
           });
-          const firstDate = dates[0] ?? date;
+          const firstDate = dates[0] ?? scheduleIsoDate(rawDate);
+          if (!firstDate && rawDate.trim()) {
+            throw new Error(`Строка ${index + 3}: некорректная дата «${rawDate}».`);
+          }
           if (!firstDate) return null;
 
           return {
-            id: Date.now() + index,
+            id: importedStartId + index,
             date: firstDate,
             title,
             location,
             route: pickString(row, "Маршрут движения", "Маршрут") || (kind === "oup" ? location : group),
             requiredBrand: brand,
             requiredQuantity: Number.isFinite(quantity) && quantity >= 0 ? quantity : 1,
-            startTime: startTime || "09:00",
-            endTime: endTime || "10:00",
+            startTime: normalizeTime(startTime, "09:00"),
+            endTime: normalizeTime(endTime, "10:00"),
             instructor,
             teacher: "",
             scheduleDates: dates.length ? dates : [firstDate],
           };
         })
-        .filter((item): item is ScheduleItem => item !== null);
+        .filter((item): item is ScheduleItem => item !== null)
+        .flatMap((item) => {
+          if (kind === "oup") return [item];
+          const row = rows[item.id - importedStartId];
+          const dates = item.scheduleDates ?? [item.date];
+          return dates.map(date => {
+            const marked = Object.entries(row ?? {}).find(([header, value]) => {
+              return columnDate(header) === date && String(value ?? "").trim();
+            })?.[1];
+            return { ...item, date, scheduleDates: [date],
+              ...(marked == null ? {} : { teacher: String(marked).trim() }) };
+          });
+        });
 
-      if (imported.length === 0) {
-        toast.error("В файле не найдено корректных записей");
-        return;
+      if (version !== importVersion.current) return;
+      if (!imported.length) throw new Error("В файле нет строк с мероприятиями и датами");
+      setImportRows(imported);
+    } catch (error) {
+      if (version === importVersion.current) {
+        setImportError(error instanceof Error ? error.message : "Не удалось прочитать Excel");
       }
+    } finally {
+      if (version === importVersion.current) setImportReading(false);
+    }
+  };
 
+  const confirmImport = async () => {
+    if (!importRows.length || saveMutation.isPending || importReading) return;
+    try {
       // Match occurrences separately so identical rows in one file keep their multiplicity.
       const signature = (entry: ScheduleItem) => JSON.stringify([
         entry.title.trim(), entry.location.trim(), entry.requiredBrand.trim(),
@@ -220,7 +323,7 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
       });
       const updated = [...items];
       let nextId = items.reduce((max, entry) => Math.max(max, entry.id), Date.now()) + 1;
-      for (const entry of imported) {
+      for (const entry of importRows) {
         const position = positions.get(signature(entry))?.shift();
         if (position === undefined) {
           updated.push({ ...entry, id: nextId++ });
@@ -228,10 +331,25 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
           updated[position] = { ...updated[position], ...entry, id: updated[position].id };
         }
       }
-      saveMutation.mutate(updated);
+      const normalized = updated.map(entry => {
+        const date = scheduleIsoDate(entry.date);
+        const dates = entry.scheduleDates?.map(scheduleIsoDate);
+        if (!date || dates?.some(value => !value)) {
+          throw new Error(`Некорректная дата в записи «${entry.title}» (ID ${entry.id}).`);
+        }
+        return { ...entry, date, ...(dates ? { scheduleDates: dates.filter((value): value is string => value !== null) } : {}) };
+      });
+      await saveMutation.mutateAsync(normalized);
+      const first = importDates[0];
+      if (first) {
+        setCurrentYear(Number(first.slice(0, 4)));
+        setCurrentMonth(Number(first.slice(5, 7)) - 1);
+        setDayRangeStart(1);
+        setDayRangeEnd(10);
+      }
+      closeImport();
     } catch (error) {
-      toast.error("Ошибка при чтении файла Excel");
-      console.error(error);
+      setImportError(error instanceof Error ? error.message : "Не удалось сохранить расписание.");
     }
   };
 
@@ -290,26 +408,46 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
         subtitle={`${subtitle}: ${monthItems.length}`}
       />
 
-      <Modal open={importOpen} onClose={() => setImportOpen(false)} title="Импорт из Excel" eyebrow="Расписание"
-        footer={<><Button variant="outline" onClick={() => setImportOpen(false)}>Отмена</Button>
-          <Button disabled={!importFile} onClick={() => { if (importFile) { setImportOpen(false); void handleExcelImport(importFile); } }}>{importFile ? "Импортировать" : "Импортировать (0)"}</Button></>}>
+      <Modal open={importOpen} onClose={() => { if (!saveMutation.isPending) closeImport(); }}
+        title="Импорт из Excel" eyebrow="Расписание" size="md"
+        footer={<>
+          <Button variant="outline" disabled={saveMutation.isPending} onClick={closeImport}>Отмена</Button>
+          <Button disabled={importReading || saveMutation.isPending || !importRows.length} onClick={confirmImport}>
+            Импортировать ({importRows.length})
+          </Button>
+        </>}>
         <div className="space-y-5">
-          <div className="rounded-md border border-neutral-200 bg-neutral-50 p-4">
-            <div className="mb-2 text-xs uppercase tracking-wider text-neutral-500">Формат файла</div>
-            <p className="text-sm text-neutral-700">Выберите таблицу Excel с записями расписания.</p>
+          <div className="space-y-2 rounded-md border border-neutral-200 bg-neutral-50 p-4 text-sm text-neutral-700">
+            <div className="text-xs uppercase tracking-wider text-neutral-500">Формат файла</div>
+            <p>Используйте шаблон расписания. Заголовки находятся во второй строке. Первые восемь столбцов содержат сведения о мероприятии, дальше идут даты. Заполненная ячейка под датой задаёт день мероприятия.</p>
+            {kind !== "oup" && <p className="text-xs">Название берётся из «Вид перевозок», место — из «Место перевозок». Отметка под датой сохраняется вместе с записью. Время можно указать как 8.00 или 08:00.</p>}
+            {kind !== "oup" && <a href="/schedule-import-template.xlsx" download className="text-xs underline">Скачать шаблон Excel</a>}
           </div>
-          <label className="block"><span className="mb-2 block text-xs uppercase tracking-wider text-neutral-500">Выбор файла</span>
-            <span className="relative block rounded-md border border-dashed border-neutral-300 bg-white px-4 py-3 text-center text-sm text-neutral-700 hover:bg-neutral-50 focus-within:ring-2">
-              {importFile ? "Заменить файл Excel" : "Выберите файл Excel (.xlsx)"}
-              <input type="file" accept=".xlsx,.xls" className="absolute inset-0 w-full cursor-pointer opacity-0" onChange={e => setImportFile(e.target.files?.[0] ?? null)} />
+          <label className="block">
+            <span className="mb-2 block text-xs uppercase tracking-wider text-neutral-500">Выбор файла</span>
+            <span className="relative block rounded-md border border-dashed border-neutral-300 px-4 py-3 text-center text-sm hover:bg-neutral-50 focus-within:ring-2">
+              {importFile ? `Выбран файл: ${importFile.name}` : "Выберите файл Excel (.xlsx)"}
+              <input type="file" accept=".xlsx,.xls" disabled={saveMutation.isPending}
+                className="absolute inset-0 w-full cursor-pointer opacity-0" onChange={event => {
+                  const file = event.target.files?.[0];
+                  if (file) void readImport(file);
+                  event.target.value = "";
+                }} />
             </span>
           </label>
+          {importReading && <p role="status" className="text-sm text-neutral-500">Чтение файла…</p>}
+          {importError && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-800">{importError}</p>}
+          {!!importRows.length && <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+            <p>Готово к импорту: {importRows.length}</p>
+            <p className="mt-1 text-xs">Период: {[importDates[0], importDates[importDates.length - 1]]
+              .map(value => value.split("-").reverse().join(".")).join(" — ")}</p>
+          </div>}
         </div>
       </Modal>
 
       <Panel className="mb-4 flex flex-col items-end gap-2 rounded-lg p-3">
         <div className="flex gap-2">
-            <Button variant="outline" onClick={() => { setImportFile(null); setImportOpen(true); }}>
+            <Button variant="outline" onClick={() => { closeImport(); setImportOpen(true); }}>
               Импорт Excel
             </Button>
             <Button onClick={handleAdd}>

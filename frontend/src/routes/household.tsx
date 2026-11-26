@@ -9,7 +9,7 @@ export const Route = createFileRoute("/household")({
         kind="household"
         title="ХОЗЯЙСТВЕННАЯ ДЕЯТЕЛЬНОСТЬ"
         subtitle="Всего мероприятий в месяце"
-        collectionName="household_schedules"
+        collectionName="household-schedules"
         columns={{
           name: "НАИМЕНОВАНИЕ МЕРОПРИЯТИЯ",
           location: "МЕСТО",
