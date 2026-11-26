@@ -47,16 +47,16 @@ function OrderRoute() {
 
 function OrderArchive() {
   type Order = { id: number; orderNumber: string | number; date: string; lines: OrderLine[] };
-  const drafts = useQuery({ queryKey: ["order-drafts"], queryFn: () => apiGetCollection<{ id: number; date: string }>("order-drafts") });
+  const drafts = useQuery({ queryKey: ["order-drafts"], queryFn: () => apiGetCollection<OrderDraft>("order-drafts") });
   const orders = useQuery({ queryKey: ["orders"], queryFn: () => apiGetCollection<Order>("orders") });
-  const [opened, setOpened] = useState<Order | null>(null);
+  const [opened, setOpened] = useState<OrderDraft | Order | null>(null);
   return <div><PageHeader title="Наряд" subtitle="Подготовьте строки и подтвердите итоговую публикацию здесь." />
     <h2 className="mb-3 text-sm font-semibold">Подготовленные наряды</h2>
-    <div className="rounded-lg border border-dashed p-8 text-center text-sm text-neutral-500">{drafts.isLoading ? "Загрузка…" : drafts.isError ? "Не удалось загрузить подготовленные наряды" : drafts.data?.length ? drafts.data.map(d => <p key={d.id}>Черновик от {d.date}</p>) : "Подготовленных нарядов пока нет. Перенесите строки из нужных подразделов."}</div>
+    <div className="rounded-lg border border-dashed p-8 text-center text-sm text-neutral-500">{drafts.isLoading ? "Загрузка…" : drafts.isError ? "Не удалось загрузить подготовленные наряды" : drafts.data?.length ? drafts.data.map(d => <p key={d.id}>Черновик от {d.date} · {d.lines.length} строк <Button variant="outline" onClick={() => setOpened(d)}>Открыть</Button></p>) : "Подготовленных нарядов пока нет. Перенесите строки из нужных подразделов."}</div>
     <h2 className="mb-3 mt-8 text-sm font-semibold">Опубликованные наряды</h2>
     {orders.isLoading && "Загрузка…"}{orders.isError && "Не удалось загрузить наряды"}
     {orders.data?.map(order => <Panel key={order.id} className="mb-3 flex items-center justify-between rounded-lg p-4"><div className="text-sm"><strong>Наряд №{order.orderNumber} от {order.date.split("-").reverse().join(".")}</strong> <span className="rounded border px-2 text-xs">Опубликован</span><div className="mt-1 text-xs text-neutral-500">{order.lines.length} строк</div></div><Button variant="outline" onClick={() => setOpened(order)}>Показать наряд</Button></Panel>)}
-    <Modal open={!!opened} onClose={() => setOpened(null)} title={"Наряд №" + (opened?.orderNumber ?? "")}><table className="w-full text-left text-sm"><thead><tr><th>Марка</th><th>Регистрационный знак</th></tr></thead><tbody>{opened?.lines.map((line,i) => <tr key={i}><td>{line.brand}</td><td>{line.regNumber}</td></tr>)}</tbody></table></Modal></div>;
+    <Modal open={!!opened} onClose={() => setOpened(null)} title={opened && "orderNumber" in opened ? "Наряд №" + opened.orderNumber : "Черновик наряда"}><table className="w-full text-left text-sm"><thead><tr><th>Марка</th><th>Регистрационный знак</th></tr></thead><tbody>{opened?.lines.map((line,i) => <tr key={i}><td>{line.brand}</td><td>{line.regNumber}</td></tr>)}</tbody></table></Modal></div>;
 }
 
 type OrderDraft = { id: number; date: string; lines: OrderLine[] };
@@ -204,61 +204,123 @@ function OrderPage() {
   const busy = isLoading || importing || picking || transferring || saveMutation.isPending;
   const today = selectedDate.split("-").reverse().join(".");
 
+  const [preview, setPreview] = useState<{
+    rows: OrderLine[];
+    skipped: { label: string; reason: string }[];
+    emptyMessage?: string;
+  } | null>(null);
+
   const handleAutopick = async () => {
-    const collection = SCHEDULE_COLLECTION[activeTab];
-    if (busy || hasChanges || !selectedDate || !collection) return;
+    if (busy || hasChanges || !selectedDate) return;
     setPicking(true);
     try {
-      const items = await apiGetCollection<ScheduleItem>(collection);
+      const collection = SCHEDULE_COLLECTION[activeTab];
+      const [items, unavailable, standing] = await Promise.all([
+        collection ? apiGetCollection<ScheduleItem>(collection) : Promise.resolve([]),
+        apiGetCollection<{ vehicleId: number; startDate: string; endDate: string }>("unavailable"),
+        duty ? apiGetCollection<number>("standing-vehicles") : Promise.resolve([]),
+      ]);
       const latest = queryClient.getQueryData<OrderLine[]>(["order-section-lines"]);
       if (!latest) throw new Error("Не удалось загрузить строки наряда");
-      const schedule = items.filter(item => item.date === selectedDate ||
-        item.scheduleDates?.includes(selectedDate));
-      const picked: OrderLine[] = [];
+      // Use the same dates as the marks in SchedulePage.
+      const datesOf = (item: ScheduleItem) => [item.date, ...(item.scheduleDates ?? [])];
+      const schedule = items.filter(item => datesOf(item).includes(selectedDate));
       const reserved = latest.filter(row => row.section !== activeTab && row.date === selectedDate);
+      const blocked = new Set(unavailable.filter(item =>
+        item.startDate <= selectedDate && item.endDate >= selectedDate).map(item => item.vehicleId));
+      const candidates = allowedVehicles.filter(vehicle => !blocked.has(vehicle.id) &&
+        (!training || /^(УЧ|УСГ|УБГ|СТР)$/.test((vehicle.group ?? "").toUpperCase().replace(/[\s.]/g, ""))));
+      if (training) {
+        const remaining = (vehicle: (typeof candidates)[number]) => {
+          const dto = vehicle.rawDto;
+          return dto ? dto.yearlyNorm - (dto.currentMileage - dto.mileageAtDec1) : -Infinity;
+        };
+        candidates.sort((a, b) => remaining(b) - remaining(a));
+      }
+      const rows: OrderLine[] = [];
+      const skipped: { label: string; reason: string }[] = [];
       let id = latest.reduce((max, row) => Math.max(max, row.id), Date.now()) + 1;
-      let missing = 0;
+      const makeLine = (): OrderLine => ({
+        id: id++, section: activeTab, date: selectedDate, brand: "", regNumber: "",
+        usageGroup: "", driver: "", responsible: "", route: "", purpose: "",
+        departureTime: "", returnTime: "", note: "",
+      });
+      const assign = (line: OrderLine, vehicle: (typeof candidates)[number] | undefined, label: string) => {
+        if (!vehicle) {
+          skipped.push({ label, reason: "Нет свободной подходящей машины" });
+          return;
+        }
+        const row = { ...line, brand: vehicle.brand, regNumber: vehicle.plate, usageGroup: vehicle.group ?? "" };
+        rows.push(row);
+        reserved.push(row);
+      };
+      if (duty) {
+        for (const vehicleId of standing) {
+          const vehicle = vehicles.find(item => item.id === vehicleId);
+          const line = makeLine();
+          assign(line, candidates.find(item => item.id === vehicleId &&
+            !reserved.some(row => row.regNumber === item.plate && overlaps(row, line))),
+            vehicle?.brand ?? String(vehicleId));
+        }
+      }
       for (const item of schedule) {
         const brand = item.requiredBrand?.trim() ?? "";
         const person = item.instructor || item.teacher || "";
-        const need = item.requiredQuantity ?? 1;
-        for (let index = 0; index < need; index++) {
-          const line: OrderLine = {
-            id: id++, section: activeTab, date: selectedDate,
-            scheduleRowId: item.id, brand, regNumber: "", usageGroup: "",
-            purpose: item.title, route: trainingRoute(item.route || item.location || ""),
-            driver: person, responsible: person,
-            departureTime: item.startTime || "", returnTime: item.endTime || "", note: "",
-          };
-          const vehicle = allowedVehicles.find(candidate =>
-            (!brand || candidate.brand.toLowerCase().includes(brand.toLowerCase())) &&
-            !reserved.some(row => row.regNumber === candidate.plate && overlaps(row, line)),
-          );
-          if (vehicle) {
-            line.brand = vehicle.brand;
-            line.regNumber = vehicle.plate;
-            line.usageGroup = vehicle.group ?? "";
-          } else {
-            missing++;
+        for (let index = 0; index < (item.requiredQuantity ?? 1); index++) {
+          const label = brand || item.title;
+          if (/^(санитарный|дежурный) автомобиль|^автомобиль под перевозку/i.test(brand)) {
+            skipped.push({ label, reason: "Дежурный или подвозочный автомобиль. Конкретная машина не назначается." });
+            continue;
           }
-          picked.push(line);
-          if (vehicle) reserved.push(line);
+          const line = {
+            ...makeLine(), scheduleRowId: item.id, purpose: item.title,
+            route: trainingRoute(item.route || item.location || ""),
+            driver: person, responsible: person,
+            departureTime: item.startTime || "", returnTime: item.endTime || "",
+          };
+          const vehicle = candidates.find(candidate => brand &&
+            candidate.brand.toLowerCase().includes(brand.toLowerCase()) &&
+            !reserved.some(row => row.regNumber === candidate.plate && overlaps(row, line)));
+          assign(line, vehicle, label);
         }
       }
-      if (!picked.length) {
-        toast.info("На выбранную дату в расписании нет заявок на машины");
-        return;
+      const dates = [...new Set(items.flatMap(datesOf).filter(Boolean))].sort();
+      const adjacentDates = [
+        [...dates].reverse().find(date => date < selectedDate),
+        dates.find(date => date > selectedDate),
+      ].filter(Boolean).map(date => date?.split("-").reverse().join(".")).join(", ");
+      let emptyMessage: string | undefined;
+      if (!rows.length && !skipped.length) {
+        if (duty) {
+          emptyMessage = "В постоянных средствах нет машин для подбора.";
+        } else if (!items.length) {
+          emptyMessage = "В расписании этого раздела пока нет записей.";
+        } else if (!schedule.length) {
+          emptyMessage = `На ${today} в расписании нет занятий.` +
+            (adjacentDates ? ` Ближайшие даты с записями: ${adjacentDates}.` : "");
+        } else {
+          emptyMessage = "Для занятий на эту дату в расписании указано нулевое количество машин.";
+        }
       }
-      await saveMutation.mutateAsync([
-        ...latest.filter(row => row.section !== activeTab || row.date !== selectedDate),
-        ...picked,
-      ]);
-      setSelectedRows(new Set());
-      if (missing) toast.info(`Без машины: ${missing}. Выберите подходящие машины в таблице.`);
-    } catch {
-      toast.error("Не удалось заполнить строки по расписанию");
+      setPreview({ rows, skipped, emptyMessage });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось выполнить подбор");
     } finally {
       setPicking(false);
+    }
+  };
+
+  const confirmPickup = async () => {
+    if (!preview || busy) return;
+    try {
+      await saveMutation.mutateAsync([
+        ...lines.filter(row => row.section !== activeTab || row.date !== selectedDate),
+        ...preview.rows,
+      ]);
+      setSelectedRows(new Set());
+      setPreview(null);
+    } catch {
+      // The mutation displays the error.
     }
   };
 
@@ -270,32 +332,28 @@ function OrderPage() {
       return;
     }
     const fields = {
-      brand: vehicle?.brand ?? (duty ? line.brand : ""),
-      regNumber: vehicle?.plate ?? (duty ? line.regNumber : ""),
-      usageGroup: vehicle?.group ?? (duty ? line.usageGroup : ""),
+      brand: vehicle?.brand ?? line.brand,
+      regNumber: vehicle?.plate ?? "",
+      usageGroup: vehicle?.group ?? "",
     };
-    if (training) {
-      saveMutation.mutate(lines.map(row => row.id === line.id ? { ...row, ...fields } : row));
-    } else {
-      editLine(line.id, fields);
-    }
+    editLine(line.id, fields);
   };
 
   const transferRows = async () => {
-    if (busy || hasChanges || !selectedDate) return;
-    const chosen = filteredLines.filter(row => selectedRows.has(row.id))
+    if (busy || !selectedDate) return;
+    const chosen = filteredLines.filter(row => !selectedRows.size || selectedRows.has(row.id))
       .map(row => ({ ...row, date: row.date || selectedDate }));
     if (!chosen.length) return;
     if (chosen.some(row => {
       const vehicle = vehicles.find(candidate => candidate.plate === row.regNumber);
       return vehicle ? !eligibleTrainingVehicle(vehicle) :
-        !duty || !eligibleTrainingVehicle({ brand: row.brand, plate: row.regNumber, group: row.usageGroup }) ||
+        !eligibleTrainingVehicle({ brand: row.brand, plate: row.regNumber, group: row.usageGroup }) ||
         !row.brand.trim();
     })) {
       toast.error("Укажите допустимую машину в каждой отмеченной строке");
       return;
     }
-    if (chosen.some(row => lines.some(other => other.id !== row.id && other.date === selectedDate &&
+    if (chosen.some(row => displayedLines.some(other => other.id !== row.id && other.date === selectedDate &&
       other.regNumber === row.regNumber && overlaps(row, other)))) {
       toast.error("В выбранных строках есть машины, назначенные на пересекающееся время");
       return;
@@ -318,13 +376,17 @@ function OrderPage() {
         date: selectedDate,
         lines: [...existing, ...chosen],
       };
+      if (hasChanges) {
+        await saveMutation.mutateAsync(displayedLines);
+        setChanges({});
+      }
       await apiPutCollection("order-drafts", draft
         ? drafts.map(item => item.id === draft.id ? updated : item)
         : [...drafts, updated]);
       await queryClient.invalidateQueries({ queryKey: ["order-drafts"] });
       toast.success("Строки перенесены в черновик наряда");
-    } catch {
-      toast.error("Не удалось перенести строки в наряд");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось перенести строки в наряд");
     } finally {
       setTransferring(false);
     }
@@ -419,8 +481,8 @@ function OrderPage() {
             <Input type="date" className="w-[132px]" disabled={busy || hasChanges} value={selectedDate}
               onChange={event => { setSelectedRows(new Set()); setSelectedDate(event.target.value); }} />
           </label>
-          {!duty && <Button variant="outline" disabled={busy || hasChanges || !selectedDate} onClick={handleAutopick}>
-            {picking ? "Заполнение…" : activeTab === "household" ? "Подбор по расписанию" : "Автозаполнение"}
+          {<Button variant="outline" disabled={busy || hasChanges || !selectedDate} onClick={handleAutopick}>
+            {picking ? "Подбор…" : "Подбор по расписанию"}
           </Button>}
           {!training && <>
             <Button variant="outline" disabled={busy || hasChanges || !selectedDate}
@@ -434,7 +496,7 @@ function OrderPage() {
                 event.target.value = "";
               }} />
           </>}
-          <Button disabled={busy || hasChanges || !selectedDate || !selectedRows.size} onClick={transferRows}>
+          <Button disabled={busy || !selectedDate || !filteredLines.length} onClick={transferRows}>
             Перенести в «Наряд»
           </Button>
         </>}
@@ -472,14 +534,14 @@ function OrderPage() {
                       className="h-[38px] w-full rounded-md border border-input bg-background px-2 text-[13px]"
                       value={inFleet ? line.regNumber : ""}
                       onChange={event => changeVehicle(line, event.target.value)}>
-                      <option value="">{duty ? "Своя марка / вне списка" : line.brand ? `Подбор: ${line.brand}` : "Выберите машину"}</option>
+                      <option value="">Своя марка / вне списка</option>
                       {allowedVehicles.map(vehicle => (
                         <option key={vehicle.id} value={vehicle.plate}>
                           {vehicle.brand} · {vehicle.plate} · {vehicle.group}
                         </option>
                       ))}
                     </select>
-                    {duty && !inFleet && <Input className="mt-1 h-[38px]" aria-label="Своя марка"
+                    {!inFleet && <Input className="mt-1 h-[38px]" aria-label="Своя марка"
                       disabled={busy} value={line.brand} onChange={event => editLine(line.id, { brand: event.target.value })} />}
                   </td>
                   {fields.map((field, index) => {
@@ -487,8 +549,8 @@ function OrderPage() {
                       : field === "note" && training ? line.note || today
                         : line[field] ?? "";
                     const time = field === "departureTime" || field === "returnTime";
-                    const editable = !training && field !== "date" &&
-                      ((field !== "regNumber" && field !== "usageGroup") || (duty && !inFleet));
+                    const identity = field === "regNumber" || field === "usageGroup";
+                    const editable = identity ? !inFleet : !training && field !== "date";
                     return (
                       <td key={field} className={cn(cell, "whitespace-pre-wrap break-words")}>
                         {editable ? <Input aria-label={headings[index + 1]} type={time ? "time" : "text"}
@@ -512,7 +574,7 @@ function OrderPage() {
         </table>
       </Panel>
 
-      {!training && <div className="mt-4 flex flex-wrap gap-2">
+      <div className="mt-4 flex flex-wrap gap-2">
         <Button variant="danger" disabled={busy || hasChanges || !selectedRows.size} onClick={handleDeleteSelected}>
           Удалить выбранные ({selectedRows.size})
         </Button>
@@ -521,7 +583,29 @@ function OrderPage() {
         </Button>
         <Button disabled={busy || !hasChanges} onClick={saveChanges}>Сохранить изменения</Button>
         {hasChanges && <Button variant="outline" disabled={busy} onClick={() => setChanges({})}>Отмена</Button>}
-      </div>}
+      </div>
+
+      <Modal open={preview !== null} onClose={() => { if (!busy) setPreview(null); }} title="Подбор по расписанию" size="md"
+        footer={<>
+          <Button variant="outline" disabled={busy} onClick={() => setPreview(null)}>Отмена</Button>
+          <Button disabled={busy} onClick={confirmPickup}>Заменить строки ({preview?.rows.length ?? 0})</Button>
+        </>}>
+        {preview && <div className="space-y-4 text-sm">
+          <p>Наряд · {today}. Подтверждение заменит строки раздела «{heading}» за выбранный день.</p>
+          {training && <p>Подбираются свободные машины указанных марок из групп УЧ, УСГ, УБГ и СТР, начиная с наибольшего остатка годовой нормы.</p>}
+          {duty && <p>Подбор по списку машин в постоянных средствах.</p>}
+          {preview.emptyMessage && <p className="rounded-md border bg-neutral-50 p-3">{preview.emptyMessage}</p>}
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
+            <p>Подобрано машин: {preview.rows.length}</p>
+            <p>Пропущено позиций: {preview.skipped.length}</p>
+          </div>
+          {preview.skipped.length > 0 && <div className="max-h-56 overflow-auto rounded-md border">
+            <p className="sticky top-0 border-b bg-neutral-50 px-3 py-2 text-xs uppercase text-neutral-500">Пропущенные позиции</p>
+            {preview.skipped.map(({ label, reason }, index) =>
+              <div key={index} className="border-b px-3 py-2 text-xs"><p>{label}</p><p className="text-neutral-600">{reason}</p></div>)}
+          </div>}
+        </div>}
+      </Modal>
 
       <Modal
         open={deleteOpen}

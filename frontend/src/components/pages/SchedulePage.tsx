@@ -145,7 +145,8 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
     try {
       const rows = await readExcelRows(file);
       const toIso = (d: string) => {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        const iso = d.trim().match(/^(\d{4}-\d{2}-\d{2})(?:$|[T ])/);
+        if (iso) return iso[1];
         const m = d.trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/);
         if (!m?.[1] || !m[2] || !m[3]) return d;
         const y = m[3].length === 2 ? `20${m[3]}` : m[3];
@@ -163,16 +164,17 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
           const location =
             pickString(row, "Место", "Локация", "Место проведения", "Место проведения занятия", "Место перевозок") ||
             [audience ? `ауд. ${audience}` : "", dept, group].filter(Boolean).join(", ");
-          const brand = pickString(row, "Марка", "Марка машины", "Машина");
-          const quantity = parseInt(pickString(row, "Количество", "Кол-во", "Количество машин")) || 1;
+          const brand = pickString(row, "Марка машин", "Марка машины", "Марка", "Машина", columns.brands);
+          const quantity = Number.parseInt(pickString(row, "Количество машин", "Количество", "Кол-во"), 10);
           const date = toIso(pickString(row, "Дата", "Дата проведения"));
-          const startTime = pickString(row, "Время начала", "Начало", "Время");
-          const endTime = pickString(row, "Время окончания", "Конец", "Время конца");
-          const instructor = pickString(row, "Преподаватель", "Инструктор", "Старший колонны");
+          const startTime = pickString(row, "Начало занятий", "Время начала", "Начало", "Время", columns.start ?? "");
+          const endTime = pickString(row, "Конец занятий", "Время окончания", "Конец", "Время конца");
+          const instructor = pickString(row, "Преподаватель (старший колонны)", "Преподаватель", "Инструктор", "Старший колонны", columns.instructor ?? "");
 
           if (!title) return null;
           const dates = Object.entries(row).flatMap(([header, value]) => {
-            if (!String(value ?? "").trim()) return [];
+            const mark = String(value ?? "").trim();
+            if (!mark || /^(?:0+(?:[.,]0+)?|false|нет|[-–—]+)$/i.test(mark)) return [];
             const key = header.trim();
             const candidate = /^\d{1,2}$/.test(key) && Number(key) >= 1 && Number(key) <= daysInMonth
               ? monthPrefix + "-" + key.padStart(2, "0") : toIso(key);
@@ -186,9 +188,9 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
             date: firstDate,
             title,
             location,
-            route: kind === "oup" ? pickString(row, "Маршрут движения", "Маршрут") : group,
+            route: pickString(row, "Маршрут движения", "Маршрут") || (kind === "oup" ? location : group),
             requiredBrand: brand,
-            requiredQuantity: quantity,
+            requiredQuantity: Number.isFinite(quantity) && quantity >= 0 ? quantity : 1,
             startTime: startTime || "09:00",
             endTime: endTime || "10:00",
             instructor,
@@ -203,7 +205,29 @@ export function SchedulePage({ kind, title, subtitle, collectionName, columns }:
         return;
       }
 
-      const updated = [...items, ...imported];
+      // Match occurrences separately so identical rows in one file keep their multiplicity.
+      const signature = (entry: ScheduleItem) => JSON.stringify([
+        entry.title.trim(), entry.location.trim(), entry.requiredBrand.trim(),
+        entry.instructor.trim(), entry.startTime, entry.endTime,
+        [...new Set([entry.date, ...(entry.scheduleDates ?? [])])].sort(),
+      ]);
+      const positions = new Map<string, number[]>();
+      items.forEach((entry, index) => {
+        const key = signature(entry);
+        const matches = positions.get(key) ?? [];
+        matches.push(index);
+        positions.set(key, matches);
+      });
+      const updated = [...items];
+      let nextId = items.reduce((max, entry) => Math.max(max, entry.id), Date.now()) + 1;
+      for (const entry of imported) {
+        const position = positions.get(signature(entry))?.shift();
+        if (position === undefined) {
+          updated.push({ ...entry, id: nextId++ });
+        } else {
+          updated[position] = { ...updated[position], ...entry, id: updated[position].id };
+        }
+      }
       saveMutation.mutate(updated);
     } catch (error) {
       toast.error("Ошибка при чтении файла Excel");
