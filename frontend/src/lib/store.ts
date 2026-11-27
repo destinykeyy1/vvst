@@ -49,11 +49,9 @@ function subscribe(listener: () => void) {
 }
 
 export function useAppState<T>(selector: (s: AppState) => T): T {
-  return useSyncExternalStore(
-    subscribe,
-    () => selector(getState()),
-    () => selector(seed),
-  );
+  // A selector may allocate a new object. React must compare the store snapshot.
+  const snapshot = useSyncExternalStore(subscribe, getState, () => seed);
+  return selector(snapshot);
 }
 
 export function uid(prefix = "id") {

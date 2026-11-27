@@ -12,7 +12,12 @@ function read(): boolean {
 }
 
 export function unlockSection(_section: string) {
-  window.sessionStorage.setItem(KEY, "true");
+  if (read()) return;
+  try {
+    window.sessionStorage.setItem(KEY, "true");
+  } catch {
+    return;
+  }
   listeners.forEach((l) => l());
 }
 

@@ -112,6 +112,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 });
 
 function RootShell({ children }: { children: ReactNode }) {
+  // The portable entry mounts React inside a document supplied by portable.html.
+  if (typeof document !== "undefined" && document.querySelector("#root[data-portable-root]")) {
+    return <>{children}</>;
+  }
+
   return (
     <html lang="ru">
       <head>

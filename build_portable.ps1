@@ -41,7 +41,8 @@ if (-not $UseExistingFrontend) {
             throw "Frontend build failed with exit code $LASTEXITCODE."
         }
 
-        & $BunExecutable run vite build --config vite.portable.config.ts
+        # Keep the portable bundle readable when diagnosing browser timeouts.
+        & $BunExecutable run vite build --config vite.portable.config.ts --minify false
         if ($LASTEXITCODE -ne 0) {
             throw "Portable frontend build failed with exit code $LASTEXITCODE."
         }
