@@ -12,31 +12,76 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, credentials: "same-origin" };
+const ACCESS_REQUEST_TIMEOUT_MS = 30_000;
+
+interface RequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: RequestOptions = {},
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) {
+    controller.abort();
+  } else {
+    options.signal?.addEventListener("abort", abort, { once: true });
+  }
+  if (options.timeoutMs !== undefined) {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, options.timeoutMs);
+  }
+
+  const init: RequestInit = {
+    method,
+    credentials: "same-origin",
+    signal: controller.signal,
+  };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const response = await fetch(path, init);
-  const text = await response.text();
-  let payload: unknown = null;
   try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = null;
-  }
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new AuthError();
+    const response = await fetch(path, init);
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = null;
     }
-    const message =
-      payload && typeof payload === "object" && "error" in payload
-        ? String((payload as { error: unknown }).error)
-        : `HTTP ${response.status}`;
-    throw new ApiError(response.status, message);
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new AuthError();
+      }
+      const message =
+        payload && typeof payload === "object" && "error" in payload
+          ? String((payload as { error: unknown }).error)
+          : `HTTP ${response.status}`;
+      throw new ApiError(response.status, message);
+    }
+    return payload as T;
+  } catch (error) {
+    if (timedOut) {
+      throw new ApiError(
+        504,
+        "Сервер не ответил за 30 секунд. Проверьте соединение и попробуйте ещё раз.",
+      );
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", abort);
   }
-  return payload as T;
 }
 
 export class AuthError extends Error {
@@ -69,44 +114,91 @@ export interface AccessStatus {
   authenticated: boolean;
 }
 
-export function apiAccessStatus(scope: AccessScope) {
-  return request<AccessStatus>("GET", `/api/access/${scope}`);
+function accessRequestOptions(signal?: AbortSignal): RequestOptions {
+  return signal
+    ? { signal, timeoutMs: ACCESS_REQUEST_TIMEOUT_MS }
+    : { timeoutMs: ACCESS_REQUEST_TIMEOUT_MS };
 }
 
-export function apiAccessLogin(scope: AccessScope, password: string) {
-  return request<AccessStatus>("POST", `/api/access/${scope}/login`, { password });
+export function apiAccessStatus(scope: AccessScope, signal?: AbortSignal) {
+  return request<AccessStatus>(
+    "GET",
+    `/api/access/${scope}`,
+    undefined,
+    accessRequestOptions(signal),
+  );
 }
 
-export function apiAccessSetup(scope: AccessScope, password: string) {
-  return request<AccessStatus>("POST", `/api/access/${scope}/setup`, { password });
+export function apiAccessLogin(
+  scope: AccessScope,
+  password: string,
+  signal?: AbortSignal,
+) {
+  return request<AccessStatus>(
+    "POST",
+    `/api/access/${scope}/login`,
+    { password },
+    accessRequestOptions(signal),
+  );
 }
 
-export function apiAccessLogout(scope: AccessScope) {
-  return request<AccessStatus>("POST", `/api/access/${scope}/logout`, {});
+export function apiAccessSetup(
+  scope: AccessScope,
+  password: string,
+  signal?: AbortSignal,
+) {
+  return request<AccessStatus>(
+    "POST",
+    `/api/access/${scope}/setup`,
+    { password },
+    accessRequestOptions(signal),
+  );
 }
 
-export function apiGetVehicleDetails(vehicleId: number): Promise<VehicleDetails> {
-  return request<VehicleDetails[]>("GET", "/api/vehicle-details").then((items) => {
-    const item = items.find((d) => d.vehicleId === vehicleId);
-    if (!item) {
-      throw new ApiError(404, "Vehicle details not found");
-    }
-    return item;
-  });
+export function apiAccessLogout(scope: AccessScope, signal?: AbortSignal) {
+  return request<AccessStatus>(
+    "POST",
+    `/api/access/${scope}/logout`,
+    {},
+    accessRequestOptions(signal),
+  );
 }
 
-export function apiPutVehicleDetails(vehicleId: number, data: VehicleDetails): Promise<VehicleDetails> {
-  return request<VehicleDetails[]>("GET", "/api/vehicle-details").then((allItems) => {
-    const filtered = allItems.filter((d) => d.vehicleId !== vehicleId);
-    const updated = [...filtered, { ...data, vehicleId }];
-    return request<VehicleDetails[]>("PUT", "/api/vehicle-details", updated).then((items) => {
+export function apiGetVehicleDetails(
+  vehicleId: number,
+): Promise<VehicleDetails> {
+  return request<VehicleDetails[]>("GET", "/api/vehicle-details").then(
+    (items) => {
       const item = items.find((d) => d.vehicleId === vehicleId);
       if (!item) {
-        throw new ApiError(404, "Vehicle details not found after save");
+        throw new ApiError(404, "Vehicle details not found");
       }
       return item;
-    });
-  });
+    },
+  );
+}
+
+export function apiPutVehicleDetails(
+  vehicleId: number,
+  data: VehicleDetails,
+): Promise<VehicleDetails> {
+  return request<VehicleDetails[]>("GET", "/api/vehicle-details").then(
+    (allItems) => {
+      const filtered = allItems.filter((d) => d.vehicleId !== vehicleId);
+      const updated = [...filtered, { ...data, vehicleId }];
+      return request<VehicleDetails[]>(
+        "PUT",
+        "/api/vehicle-details",
+        updated,
+      ).then((items) => {
+        const item = items.find((d) => d.vehicleId === vehicleId);
+        if (!item) {
+          throw new ApiError(404, "Vehicle details not found after save");
+        }
+        return item;
+      });
+    },
+  );
 }
 
 export interface VehicleDetails {
@@ -216,6 +308,10 @@ export interface ScheduleItem {
   scheduleDates?: string[];
 }
 
-export function apiSaveMileage(state: { vehicles: unknown[]; journal: unknown[]; exploitation: unknown[] }) {
+export function apiSaveMileage(state: {
+  vehicles: unknown[];
+  journal: unknown[];
+  exploitation: unknown[];
+}) {
   return request("PUT", "/api/mileage-sync", state);
 }

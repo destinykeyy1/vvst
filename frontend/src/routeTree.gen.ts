@@ -18,6 +18,7 @@ import { Route as HouseholdRouteImport } from './routes/household'
 import { Route as JournalRouteImport } from './routes/journal'
 import { Route as OrderRouteImport } from './routes/order'
 import { Route as OupRouteImport } from './routes/oup'
+import { Route as RegistryChangesRouteImport } from './routes/registry-changes'
 import { Route as UnavailableRouteImport } from './routes/unavailable'
 import { Route as VvstRouteImport } from './routes/vvst'
 import { Route as CardVehicleIdRouteImport } from './routes/card.$vehicleId'
@@ -71,6 +72,11 @@ const OupRoute = OupRouteImport.update({
   path: '/oup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RegistryChangesRoute = RegistryChangesRouteImport.update({
+  id: '/registry-changes',
+  path: '/registry-changes',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const UnavailableRoute = UnavailableRouteImport.update({
   id: '/unavailable',
   path: '/unavailable',
@@ -117,6 +123,7 @@ export interface FileRoutesByFullPath {
   '/journal': typeof JournalRoute
   '/order': typeof OrderRoute
   '/oup': typeof OupRoute
+  '/registry-changes': typeof RegistryChangesRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
   '/card/$vehicleId': typeof CardVehicleIdRoute
@@ -135,6 +142,7 @@ export interface FileRoutesByTo {
   '/journal': typeof JournalRoute
   '/order': typeof OrderRoute
   '/oup': typeof OupRoute
+  '/registry-changes': typeof RegistryChangesRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
   '/card/$vehicleId': typeof CardVehicleIdRoute
@@ -154,6 +162,7 @@ export interface FileRoutesById {
   '/journal': typeof JournalRoute
   '/order': typeof OrderRoute
   '/oup': typeof OupRoute
+  '/registry-changes': typeof RegistryChangesRoute
   '/unavailable': typeof UnavailableRoute
   '/vvst': typeof VvstRoute
   '/card/$vehicleId': typeof CardVehicleIdRoute
@@ -174,6 +183,7 @@ export interface FileRouteTypes {
     | '/journal'
     | '/order'
     | '/oup'
+    | '/registry-changes'
     | '/unavailable'
     | '/vvst'
     | '/card/$vehicleId'
@@ -192,6 +202,7 @@ export interface FileRouteTypes {
     | '/journal'
     | '/order'
     | '/oup'
+    | '/registry-changes'
     | '/unavailable'
     | '/vvst'
     | '/card/$vehicleId'
@@ -210,6 +221,7 @@ export interface FileRouteTypes {
     | '/journal'
     | '/order'
     | '/oup'
+    | '/registry-changes'
     | '/unavailable'
     | '/vvst'
     | '/card/$vehicleId'
@@ -229,6 +241,7 @@ export interface RootRouteChildren {
   JournalRoute: typeof JournalRoute
   OrderRoute: typeof OrderRoute
   OupRoute: typeof OupRoute
+  RegistryChangesRoute: typeof RegistryChangesRoute
   UnavailableRoute: typeof UnavailableRoute
   VvstRoute: typeof VvstRoute
   WriteoffAkbRoute: typeof WriteoffAkbRoute
@@ -300,6 +313,13 @@ declare module '@tanstack/react-router' {
       path: '/oup'
       fullPath: '/oup'
       preLoaderRoute: typeof OupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/registry-changes': {
+      id: '/registry-changes'
+      path: '/registry-changes'
+      fullPath: '/registry-changes'
+      preLoaderRoute: typeof RegistryChangesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/unavailable': {
@@ -374,6 +394,7 @@ const rootRouteChildren: RootRouteChildren = {
   JournalRoute: JournalRoute,
   OrderRoute: OrderRoute,
   OupRoute: OupRoute,
+  RegistryChangesRoute: RegistryChangesRoute,
   UnavailableRoute: UnavailableRoute,
   VvstRoute: VvstRoute,
   WriteoffAkbRoute: WriteoffAkbRoute,

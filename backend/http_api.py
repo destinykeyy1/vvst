@@ -498,14 +498,14 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                 _string(password, 'password')
                 if len(password) < ACCESS_PASSWORD_MIN_LENGTH or len(password) > ACCESS_PASSWORD_MAX_LENGTH or not password.strip():
                     raise ValidationError(f'Пароль должен содержать от {ACCESS_PASSWORD_MIN_LENGTH} до {ACCESS_PASSWORD_MAX_LENGTH} символов')
+                if not login_attempt_allowed(attempt_key):
+                    self.send_json(429, {'error': 'Слишком много попыток. Повторите позже.'}, {'Retry-After': str(login_window_seconds)})
+                    return
                 if action == 'setup':
                     if not store.set_access_password(scope, password):
                         self.send_json(409, {'error': 'Пароль уже настроен.'})
                         return
-                if not login_attempt_allowed(attempt_key):
-                    self.send_json(429, {'error': 'Слишком много попыток. Повторите позже.'}, {'Retry-After': str(login_window_seconds)})
-                    return
-                if not store.verify_access_password(scope, password):
+                elif not store.verify_access_password(scope, password):
                     record_login_failure(attempt_key)
                     self.send_json(401, {'error': 'Неверный пароль.'})
                     return

@@ -1,4 +1,10 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   apiAccessLogin,
   apiAccessSetup,
@@ -27,7 +33,15 @@ const SECTION_SCOPES: Record<string, AccessScope> = {
   order: "general",
 };
 
-export function PasswordGate({ section, title, children }: { section: string; title: string; children: ReactNode }) {
+export function PasswordGate({
+  section,
+  title,
+  children,
+}: {
+  section: string;
+  title: string;
+  children: ReactNode;
+}) {
   const scope = SECTION_SCOPES[section] ?? "passport";
   const { ready } = useSectionUnlocked(section);
   const [status, setStatus] = useState<AccessStatus | null>(null);
@@ -35,19 +49,24 @@ export function PasswordGate({ section, title, children }: { section: string; ti
   const [value, setValue] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [apiAuthenticated, setApiAuthenticated] = useState<boolean | null>(null);
+  const [apiAuthenticated, setApiAuthenticated] = useState<boolean | null>(
+    null,
+  );
+  const busyRef = useRef(false);
+  const requestController = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    apiAccessStatus(scope)
+    const controller = new AbortController();
+    apiAccessStatus(scope, controller.signal)
       .then((s) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         setStatus(s);
         setApiAuthenticated(s.authenticated);
         if (s.authenticated) unlockSection(section);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         if (err instanceof AuthError) {
           setApiAuthenticated(false);
         } else {
@@ -56,10 +75,19 @@ export function PasswordGate({ section, title, children }: { section: string; ti
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [scope, section]);
 
-  const authenticated = status?.authenticated === true || apiAuthenticated === true;
+  useEffect(() => {
+    return () => {
+      requestController.current?.abort();
+      requestController.current = null;
+    };
+  }, []);
+
+  const authenticated =
+    status?.authenticated === true || apiAuthenticated === true;
   const showContent = authenticated;
 
   if (!ready) return null;
@@ -70,10 +98,16 @@ export function PasswordGate({ section, title, children }: { section: string; ti
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError("");
+    const controller = new AbortController();
+    requestController.current = controller;
     try {
-      const result = needsSetup ? await apiAccessSetup(scope, value) : await apiAccessLogin(scope, value);
+      const result = needsSetup
+        ? await apiAccessSetup(scope, value, controller.signal)
+        : await apiAccessLogin(scope, value, controller.signal);
       if (result.authenticated) {
         setApiAuthenticated(true);
         unlockSection(section);
@@ -81,9 +115,17 @@ export function PasswordGate({ section, title, children }: { section: string; ti
         setError("Не удалось подтвердить доступ. Попробуйте ещё раз.");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Ошибка соединения с сервером.");
+      if (!controller.signal.aborted) {
+        setError(
+          err instanceof Error ? err.message : "Ошибка соединения с сервером.",
+        );
+      }
     } finally {
-      setBusy(false);
+      if (requestController.current === controller) {
+        requestController.current = null;
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -113,7 +155,11 @@ export function PasswordGate({ section, title, children }: { section: string; ti
             }}
           />
           {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
-          {statusFailed && <p className="mt-4 text-sm text-destructive">Сервер недоступен. Запустите Military Planner.</p>}
+          {statusFailed && (
+            <p className="mt-4 text-sm text-destructive">
+              Сервер недоступен. Запустите Military Planner.
+            </p>
+          )}
           <Button type="submit" className="mt-6 w-full" disabled={busy}>
             {busy ? "Проверка..." : needsSetup ? "Задать пароль" : "Войти"}
           </Button>
