@@ -84,7 +84,7 @@ const DEPARTURE_COLUMNS: Column[] = [
 const TRIP_COLUMNS: Column[] = [
   { key: "purpose", label: "Цель выезда и маршрут движения", width: 240, type: "textarea" },
   { key: "authority", label: "В чьё распоряжение", width: 176 },
-  { key: "returnDeadline", label: "Срок возвращения", width: 144, type: "time" },
+  { key: "returnDeadline", label: "Время возвращения", width: 144, type: "time" },
 ];
 
 const ARRIVAL_COLUMNS: Column[] = [
@@ -301,6 +301,7 @@ function JournalPage() {
   const [dutyOfficer, setDutyOfficer] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
   const [report, setReport] = useState<MonthReport | null>(null);
+  const [reportAuthorized, setReportAuthorized] = useState(false);
   const [archivePassword, setArchivePassword] = useState("");
   const [selectedId, setSelectedId] = useState<JournalRow["id"] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
@@ -388,18 +389,24 @@ function JournalPage() {
     mutationFn: () => journalRequest<{ updated: number }>("save-signature", { date: dutyDate, name: dutyOfficer }),
     onSuccess: async ({ updated }) => {
       await queryClient.invalidateQueries({ queryKey: ["journal"] });
-      toast.success(`Подпись обновлена в записях: ${updated}`);
+      if (updated) toast.success(`Подпись проставлена в записях: ${updated}`);
+      else toast.info("За выбранную дату нет закрытых записей без подписи.");
     },
     onError: (error) => toast.error(error.message),
+  });
+
+  const reportPasswordMutation = useMutation({
+    mutationFn: () => journalRequest("verify-password", { password: archivePassword }),
+    onSuccess: () => setReportAuthorized(true),
   });
 
   const pdfMutation = useMutation({
     mutationFn: async () => {
       const month = localToday().slice(0, 7);
       const result = await journalRequest<{ snapshot: string; items: JournalRow[]; removable: number }>(
-        "month-report", { month },
+        "month-report", { month, password: archivePassword },
       );
-      if (!result.items.length) throw new Error("За текущий месяц нет записей с подписью дежурного.");
+      if (!result.items.length) throw new Error("За текущий месяц нет завершённых записей с подписью дежурного.");
       const header = ({ label: text, width }: Column) => ({ text, width });
       downloadJournalPdf(`Журнал выхода и возвращения машин ${month}`, [
         [
@@ -410,23 +417,12 @@ function JournalPage() {
           header(DUTY_OFFICER),
         ],
         groupedColumns.map(header),
-      ], result.items.sort(newestFirst).map(row => {
-        const returned = isClosed(row) && (!row.arrivalDate || row.arrivalDate.slice(0, 7) <= month);
-        return tableColumns.map(({ key, width }) => ({
-          width,
-          text: !returned && (ARRIVAL_COLUMNS.some(column => column.key === key) || key === REMARKS.key)
-            ? "" : displayCell(row, key),
-        }));
-      }));
+      ], result.items.sort(newestFirst).map(row =>
+        tableColumns.map(({ key, width }) => ({ width, text: displayCell(row, key) })),
+      ));
       return { month, snapshot: result.snapshot, removable: result.removable };
     },
-    onSuccess: (result) => {
-      if (result.removable) setReport(result);
-      else {
-        setReportOpen(false);
-        toast.success("PDF подготовлен. Записей для удаления нет.");
-      }
-    },
+    onSuccess: setReport,
     onError: (error) => toast.error(error.message),
   });
 
@@ -437,6 +433,7 @@ function JournalPage() {
     onSuccess: async ({ deleted }) => {
       setReport(null);
       setReportOpen(false);
+      setReportAuthorized(false);
       setArchivePassword("");
       setSelectedId(null);
       await queryClient.invalidateQueries({ queryKey: ["journal"] });
@@ -444,8 +441,10 @@ function JournalPage() {
     },
     onError: (error) => toast.error(error.message),
   });
-  const reportBusy = pdfMutation.isPending || archiveMutation.isPending;
+  const reportBusy = reportPasswordMutation.isPending || pdfMutation.isPending || archiveMutation.isPending;
   function closeReport() {
+    reportPasswordMutation.reset();
+    setReportAuthorized(false);
     setReportOpen(false);
     setReport(null);
     setArchivePassword("");
@@ -849,12 +848,16 @@ function JournalPage() {
         footer={
           <>
             <Button variant="outline" disabled={reportBusy} onClick={closeReport}>Отмена</Button>
-            {report ? (
+            {!reportAuthorized ? (
+              <Button disabled={reportBusy || !archivePassword} onClick={() => reportPasswordMutation.mutate()}>
+                Проверить пароль
+              </Button>
+            ) : report ? (
               <Button
                 disabled={reportBusy || !archivePassword}
                 onClick={() => archiveMutation.mutate(report)}
               >
-                PDF сохранён, удалить записи
+                Подтвердить корректность PDF и удалить записи
               </Button>
             ) : (
               <Button disabled={reportBusy} onClick={() => pdfMutation.mutate()}>Скачать PDF</Button>
@@ -862,15 +865,24 @@ function JournalPage() {
           </>
         }
       >
-        <p className="mb-4 text-sm">
-          После сохранения PDF и подтверждения завершённые записи за текущий месяц будут удалены.
-          Записи без подписи дежурного пропускаются и остаются в журнале.
-        </p>
-        {report && (
-          <Field label={`Пароль журнала для удаления записей (${report.removable})`}>
-            <Input type="password" autoComplete="current-password" value={archivePassword}
-              onChange={event => setArchivePassword(event.target.value)} />
+        {!reportAuthorized ? (
+          <Field label="Пароль журнала">
+            <Input type="password" autoComplete="current-password" autoFocus
+              disabled={reportBusy} value={archivePassword}
+              onChange={event => {
+                setArchivePassword(event.target.value);
+                reportPasswordMutation.reset();
+              }} />
+            {reportPasswordMutation.error && (
+              <p role="alert" className="mt-2 text-sm text-destructive">{reportPasswordMutation.error.message}</p>
+            )}
           </Field>
+        ) : (
+          <div className="space-y-2 text-sm">
+            <p>Записи без подписи дежурного и записи о машинах, которые ещё в рейсе, останутся в журнале и будут пропущены при выгрузке.</p>
+            <p>Откройте скачанный PDF и проверьте его. Выгруженные записи будут удалены только после вашего подтверждения.</p>
+            {report && <p>Записей к удалению: {report.removable}.</p>}
+          </div>
         )}
       </Modal>
 

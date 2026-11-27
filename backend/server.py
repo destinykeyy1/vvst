@@ -1958,25 +1958,27 @@ class PlannerStore:
             result = db.execute("""
                 UPDATE planner_items
                 SET payload = jsonb_set(payload, '{dutySignature}', to_jsonb(%s::text))
-                WHERE collection = 'journal' AND payload->>'date' = %s
+                WHERE collection = 'journal'
+                  AND COALESCE(NULLIF(payload->>'arrivalDate', ''), payload->>'date') = %s
+                  AND COALESCE(payload->>'dutySignature', '') !~ '[^[:space:]]'
                   AND (NULLIF(payload->>'closedAt', '') IS NOT NULL OR payload->'closed' = 'true'::jsonb)
             """, (name, body['date']))
             return {'updated': result.rowcount}
 
     def journal_month_report(self, body, archive=False):
-        _exact_fields(body, {'month', 'snapshot', 'password'} if archive else {'month'})
+        _exact_fields(body, {'month', 'snapshot', 'password'} if archive else {'month', 'password'})
         month = body['month']
         if not isinstance(month, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}', month):
             raise ValidationError('Некорректный месяц отчёта')
         _iso_date(month + '-01', 'date')
         with self.connect() as db:
             self._lock_journal(db)
+            password = body['password']
+            _string(password, 'password')
+            if len(password) > ACCESS_PASSWORD_MAX_LENGTH or not self._journal_password_matches(db, password):
+                raise JournalPermissionError('Неверный пароль журнала')
             if archive:
-                password = body['password']
-                _string(password, 'password')
                 _string(body['snapshot'], 'snapshot')
-                if len(password) > ACCESS_PASSWORD_MAX_LENGTH or not self._journal_password_matches(db, password):
-                    raise JournalPermissionError('Неверный пароль журнала')
             items = db.execute("""
                 SELECT item_id, payload FROM planner_items
                 WHERE collection = 'journal'
@@ -1990,11 +1992,10 @@ class PlannerStore:
                 departure = (entry.get('date') or '')[:7]
                 arrival = (entry.get('arrivalDate') or '')[:7]
                 returned = _journal_closed(entry) or entry.get('closed') is True
-                if departure != month and not (returned and arrival == month):
+                if not returned or (arrival or departure) > month or month not in (departure, arrival):
                     continue
                 rows.append((item_id, entry))
-                if returned and (arrival or departure) <= month:
-                    removable.append(item_id)
+                removable.append(item_id)
             snapshot = hashlib.sha256(json.dumps(rows, sort_keys=True).encode('utf-8')).hexdigest()
             if archive:
                 if snapshot != body['snapshot']:
@@ -2035,6 +2036,8 @@ class PlannerStore:
             if _journal_closed(payload):
                 raise ConflictError('Запись журнала уже закрыта')
             updated = {**payload, **fields, 'closedAt': datetime.now(timezone.utc).isoformat()}
+            if (payload.get('dutySignature') or '').strip():
+                updated['dutySignature'] = payload['dutySignature']
             if not updated.get('arrivalDate') or not updated.get('arrivalTime'):
                 raise ValidationError('Заполните дату и время прибытия')
             parsed = JournalEntryDTO.parse(updated)
@@ -2057,8 +2060,7 @@ class PlannerStore:
             elif fields.keys() & _JOURNAL_ARRIVAL_ONLY_FIELDS:
                 raise ValidationError('Поля прибытия можно изменить только при закрытии записи')
             updated = {**payload, **fields}
-            if not closed:
-                updated['dutySignature'] = ''
+            updated['dutySignature'] = payload.get('dutySignature', '') if closed else ''
             parsed = JournalEntryDTO.parse(updated)
             _validate_journal_arrival(parsed, payload)
             db.execute("UPDATE planner_items SET payload = %s WHERE collection = 'journal' AND item_id = %s", (Jsonb(parsed), item_id))
@@ -2467,16 +2469,24 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                     self.send_json(503, {'error': 'database unavailable'})
                 return
             if path in {'/api/journal/save-signature', '/api/journal/month-report', '/api/journal/archive-month'}:
+                attempt_key = f'{self.client_address[0]}:journal'
+                report_action = path != '/api/journal/save-signature'
+                if report_action and not login_attempt_allowed(attempt_key):
+                    self.send_json(429, {'error': 'Слишком много попыток. Попробуйте позже.'})
+                    return
                 try:
                     body = self.read_body()
                     if path == '/api/journal/save-signature':
                         result = store.journal_save_signature(body)
                     else:
                         result = store.journal_month_report(body, archive=path == '/api/journal/archive-month')
+                    if report_action:
+                        clear_login_failures(attempt_key)
                     self.send_json(200, result, {'Cache-Control': 'no-store'})
                 except ValidationError as exc:
                     self.send_json(400, {'error': str(exc)})
                 except JournalPermissionError as exc:
+                    record_login_failure(attempt_key)
                     self.send_json(403, {'error': str(exc)})
                 except ConflictError as exc:
                     self.send_json(409, {'error': str(exc)})
