@@ -8,6 +8,7 @@ import {
   PASSPORT_HEADERS,
   exportPassportExcel,
   importPassportExcel,
+  applyPassportCellEdit,
   vehicleToPassportRow,
 } from "@/lib/passportExcel";
 import { formatNumber } from "@/lib/logic";
@@ -35,7 +36,7 @@ export const Route = createFileRoute("/vvst")({
   ),
 });
 
-type EditableKey = "unit" | "brand" | "year" | "commissionDate" | "order" | "plate" | "group" | "assignedTo" | "mileage" | "motoHours";
+type EditableKey = "unit" | "brand" | "year" | "commissionDate" | "order" | "plate" | "group" | "assignedTo" | "mileage" | "motoHours" | "statusReason";
 
 interface Column {
   key: EditableKey;
@@ -57,7 +58,7 @@ const COLUMNS: Column[] = [
 ];
 
 // Passport column index (0-based) -> editable Vehicle field.
-const EDITABLE_BY_COL: Record<number, EditableKey> = {
+const EDITABLE_BY_COL: Partial<Record<number, EditableKey>> = {
   1: "unit",
   2: "brand",
   3: "year",
@@ -66,6 +67,7 @@ const EDITABLE_BY_COL: Record<number, EditableKey> = {
   6: "plate",
   7: "group",
   8: "assignedTo",
+  12: "statusReason",
   95: "mileage",
   102: "motoHours",
 };
@@ -74,8 +76,17 @@ const NUMERIC_COLS = new Set([3, 95, 102]);
 
 interface Edit {
   id: number;
-  key: EditableKey;
+  key: EditableKey | number;
   value: string | number;
+}
+
+function applyEdit(vehicle: Vehicle, { key, value }: Edit): Vehicle {
+  if (typeof key === "number") return applyPassportCellEdit(vehicle, key, String(value));
+  if (key === "motoHours") {
+    const updated = applyVehicleEdit(vehicle, { key, value, id: vehicle.id });
+    return applyPassportCellEdit(updated, MOTO_HOURS_COLUMN, value);
+  }
+  return { ...vehicle, [key]: value };
 }
 
 const ALL_COLUMNS = PASSPORT_HEADERS.map((_, index) => index);
@@ -171,7 +182,7 @@ function VvstPage() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [edits, setEdits] = useState<Edit[]>([]);
   const [redo, setRedo] = useState<Edit[]>([]);
-  const [editing, setEditing] = useState<{ id: number; key: EditableKey; draft: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: number; key: EditableKey | number; draft: string } | null>(null);
   const [sort, setSort] = useState<{ col: number; ascending: boolean } | null>(null);
   const [visible, setVisible] = useState(() => new Set(ALL_COLUMNS));
   const [columnDraft, setColumnDraft] = useState<Set<number> | null>(null);
@@ -193,7 +204,7 @@ function VvstPage() {
     });
     for (const e of edits) {
       const v = map.get(e.id);
-      if (v) map.set(e.id, { ...v, [e.key]: e.value });
+      if (v) map.set(e.id, applyEdit(v, e));
     }
     return vehicles.map((v) => map.get(v.id) ?? v);
   }, [vehicles, edits]);
@@ -234,7 +245,7 @@ function VvstPage() {
   const save = () => {
     updateVehicles((list) => list.map((vehicle) =>
       edits.reduce((updated, edit) => edit.id === vehicle.id
-        ? applyVehicleEdit(updated, edit)
+        ? applyEdit(updated, edit)
         : updated, vehicle),
     ));
     toast.success(`Сохранено изменений: ${edits.length}`);
@@ -293,8 +304,8 @@ function VvstPage() {
   const commitCell = () => {
     if (!editing) return;
     const numeric = COLUMNS.find((column) => column.key === editing.key)?.numeric;
-    const value = numeric ? toNumber(editing.draft) : editing.draft;
-    if (value === null || (typeof value === "number" && value < 0)) {
+    const value = numeric ? (editing.draft.trim() ? toNumber(editing.draft) : null) : editing.draft;
+    if (value === null || (typeof value === "number" && (value < 0 || (editing.key !== "motoHours" && !Number.isSafeInteger(value))))) {
       toast.error("Введите корректное число");
       return;
     }
@@ -438,7 +449,7 @@ function VvstPage() {
                 </td>
                 {visibleColumns.map((col) => {
                   const raw = cells[col];
-                  const editKey = EDITABLE_BY_COL[col];
+                  const editKey = col === 0 ? undefined : EDITABLE_BY_COL[col] ?? col;
                   const isEditing = editKey !== undefined && editing?.id === v.id && editing.key === editKey;
                   const display = raw === "" || raw === null || raw === undefined ? "" : NUMERIC_COLS.has(col) ? formatNumber(Number(raw)) : String(raw);
                   const numeric = editKey ? COLUMNS.find((c) => c.key === editKey)?.numeric : false;
@@ -470,6 +481,8 @@ function VvstPage() {
                           <span className="flex-1 whitespace-pre-wrap break-words">{display}</span>
                           {editKey !== undefined && (
                             <button
+                              type="button"
+                              aria-label={`Изменить: ${PASSPORT_HEADERS[col]}`}
                               className="no-print shrink-0 text-[10px] text-subtle hover:text-foreground"
                               onClick={() => setEditing({ id: v.id, key: editKey, draft: String(raw ?? "") })}
                             >

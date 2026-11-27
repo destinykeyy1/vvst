@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import (unquote, urlparse, urlsplit)
+from urllib.parse import (parse_qs, unquote, urlparse, urlsplit)
 from zipfile import BadZipFile, ZipFile
 
 import psycopg
@@ -699,6 +699,8 @@ CURRENT_HOURS_HEADER = 'Текущие показания МОТОЧАСОВ'
 
 
 def _current_hours_field(field):
+    if field.get('header') == 'meta:motoHours':
+        return True
     key = _document_key(field.get('header', ''))
     if key in ('103', 'n103'):
         return True
@@ -738,7 +740,7 @@ def _vehicle_with_current_hours(vehicle):
     return {
         **vehicle,
         'passportData': [
-            {**field, 'header': CURRENT_HOURS_HEADER, 'value': hours} if _current_hours_field(field) else field
+            {**field, 'value': hours} if _current_hours_field(field) else field
             for field in vehicle['passportData']
         ],
     }
@@ -1462,6 +1464,72 @@ def _document_order_export(template, body, vehicles, details):
     return output.getvalue()
 
 
+def _registry_cells(vehicle):
+    """Effective stored values, independent of the order of passportData entries."""
+    if not vehicle:
+        return {}
+    labels = {
+        'meta:type': 'Тип машины', 'meta:year': 'Год выпуска',
+        'meta:commissionDate': 'Дата ввода в эксплуатацию',
+        'meta:order': 'Наряд на получение (передачу) ВВСТ',
+        'meta:status': 'Техническое состояние', 'meta:statusReason': 'Характер неисправности',
+    }
+    cells = {}
+    for field in vehicle.get('passportData') or []:
+        header = field['header']
+        if _current_hours_field(field):
+            continue
+        label = labels.get(header, header)
+        if not header.startswith('meta:'):
+            label = f"{label} (столбец {field['column']})"
+        # Repeated passport headings refer to different physical columns.
+        key = header if header.startswith('meta:') else ('passport', field['column'])
+        cells[key] = (label, field['value'])
+    for key, label in {
+        'id': 'Идентификатор машины', 'brand': 'Марка машины',
+        'regNumber': 'Государственный регистрационный знак (строевой номер)',
+        'usageType': 'Группа эксплуатации', 'driver': 'Закреплённый водитель',
+        'location': 'Подразделение', 'currentMileage': 'Текущие показания СПИДОМЕТРА',
+        'mileageAtDec1': 'Пробег на 1 декабря', 'yearlyNorm': 'Годовая норма, км',
+    }.items():
+        cells[key] = (label, vehicle.get(key))
+    for key in ('batteryStatus', 'tireStatus', 'hasCertificate', 'hasHistory'):
+        cells[key] = (RUSSIAN_FIELD_NAMES[key], vehicle.get(key))
+    maintenance = vehicle.get('maintenanceInfo') or {}
+    cells['maintenanceText'] = ('Сведения о техническом обслуживании', maintenance.get('text'))
+    cells['maintenanceStatus'] = ('Статус технического обслуживания', maintenance.get('status'))
+    cells['hours'] = (CURRENT_HOURS_HEADER, _passport_current_hours(vehicle))
+    return cells
+
+
+def _record_registry_changes(db, before, after):
+    changes = []
+    for vehicle_id in sorted(before.keys() | after.keys()):
+        old, new = before.get(vehicle_id), after.get(vehicle_id)
+        if old == new:
+            continue
+        vehicle = new or old
+        left, right = _registry_cells(old), _registry_cells(new)
+        for key in dict.fromkeys((*left, *right)):
+            label, previous = left.get(key, (None, None))
+            label, current = right.get(key, (label, None))
+            if previous != current or isinstance(previous, bool) != isinstance(current, bool):
+                changes.append((vehicle['id'], vehicle['regNumber'], label,
+                                Jsonb(previous), Jsonb(current)))
+    if changes:
+        db.cursor().executemany(
+            'INSERT INTO planner_registry_changes '
+            '(vehicle_id, reg_number, column_name, old_value, new_value) VALUES (%s,%s,%s,%s,%s)',
+            changes,
+        )
+
+
+def _audit_registry_replacement(db, items):
+    rows = db.execute("SELECT item_id, payload FROM planner_items WHERE collection = 'vehicles' "
+                      "ORDER BY item_id FOR UPDATE").fetchall()
+    _record_registry_changes(db, dict(rows), {item['id']: item for item in items})
+
+
 class PlannerStore:
     '''Owns the frontend PostgreSQL collection table.'''
 
@@ -1476,6 +1544,36 @@ class PlannerStore:
             db.execute("\n                ALTER TABLE planner_access_credentials\n                ADD CONSTRAINT planner_access_credentials_scope_check\n                CHECK (scope IN ('orders', 'passport', 'general'))\n            ")
             db.execute('\n                CREATE TABLE IF NOT EXISTS planner_access_sessions (\n                    token_hash TEXT PRIMARY KEY,\n                    scope TEXT NOT NULL REFERENCES planner_access_credentials(scope)\n                        ON DELETE CASCADE,\n                    expires_at TIMESTAMPTZ NOT NULL\n                )\n            ')
             db.execute('\n                CREATE INDEX IF NOT EXISTS planner_access_sessions_scope_expiry\n                ON planner_access_sessions (scope, expires_at)\n            ')
+
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS planner_registry_changes (
+                    id BIGSERIAL PRIMARY KEY,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+                    vehicle_id BIGINT NOT NULL,
+                    reg_number TEXT NOT NULL,
+                    column_name TEXT NOT NULL,
+                    old_value JSONB NOT NULL,
+                    new_value JSONB NOT NULL
+                )
+            """)
+
+    def list_registry_changes(self, before):
+        query = ("SELECT id, changed_at, vehicle_id, reg_number, column_name, old_value, new_value "
+                 "FROM planner_registry_changes ")
+        args = ()
+        if before is not None:
+            query += "WHERE id < %s "
+            args = (before,)
+        with self.connect() as db:
+            rows = db.execute(query + "ORDER BY id DESC LIMIT 101", args).fetchall()
+        return {
+            'items': [
+                {'id': str(row[0]), 'changedAt': row[1].isoformat(), 'vehicleId': str(row[2]),
+                 'regNumber': row[3], 'column': row[4], 'old': row[5], 'new': row[6]}
+                for row in rows[:100]
+            ],
+            'next': str(rows[99][0]) if len(rows) > 100 else None,
+        }
 
     def connect(self) -> 'psycopg.Connection':
         return psycopg.connect(self.url, **self.connect_kwargs)
@@ -1562,10 +1660,11 @@ class PlannerStore:
                 fields.append(field)
                 matches.append(field)
             for field in matches:
-                field.update(header=CURRENT_HOURS_HEADER, value=hours)
+                field['value'] = hours
         if odometer is not None or hours is not None:
             updated['passportData'] = fields
         VehicleDTO.parse(updated)
+        _record_registry_changes(db, {vehicle['id']: vehicle}, {updated['id']: updated})
         db.execute(
             "UPDATE planner_items SET payload = %s WHERE collection = 'vehicles' AND item_id = %s",
             (Jsonb(updated), vehicle['id']),
@@ -1703,6 +1802,7 @@ class PlannerStore:
             parsed['exploitation'] = [
                 item for item in parsed['exploitation'] if item.get('journalEntryId') not in readings
             ] + list(readings.values())
+            _audit_registry_replacement(db, parsed['vehicles'])
             for collection, items in parsed.items():
                 db.execute('DELETE FROM planner_items WHERE collection = %s', (collection,))
                 key = definitions[collection][1]
@@ -1781,6 +1881,9 @@ class PlannerStore:
         if len(ids) != len(set(ids)):
             raise ValidationError('Идентификаторы должны быть уникальными')
         with self.connect() as db:
+            if collection == 'vehicles':
+                self._lock_journal(db)
+                _audit_registry_replacement(db, parsed)
             if collection == 'journal':
                 self._lock_journal(db)
                 self._validate_journal_replacement(db, parsed)
@@ -1843,12 +1946,79 @@ class PlannerStore:
         candidate = hashlib.pbkdf2_hmac('sha256', password_bytes, bytes(row[0]), ACCESS_PASSWORD_HASH_ITERATIONS)
         return hmac.compare_digest(candidate, bytes(row[1]))
 
+    def journal_save_signature(self, body):
+        _exact_fields(body, {'date', 'name'})
+        _iso_date(body['date'], 'date')
+        _string(body['name'], 'name')
+        name = body['name'].strip()
+        if not name or len(name) > 250:
+            raise ValidationError('Укажите фамилию и инициалы дежурного')
+        with self.connect() as db:
+            self._lock_journal(db)
+            result = db.execute("""
+                UPDATE planner_items
+                SET payload = jsonb_set(payload, '{dutySignature}', to_jsonb(%s::text))
+                WHERE collection = 'journal' AND payload->>'date' = %s
+                  AND (NULLIF(payload->>'closedAt', '') IS NOT NULL OR payload->'closed' = 'true'::jsonb)
+            """, (name, body['date']))
+            return {'updated': result.rowcount}
+
+    def journal_month_report(self, body, archive=False):
+        _exact_fields(body, {'month', 'snapshot', 'password'} if archive else {'month'})
+        month = body['month']
+        if not isinstance(month, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}', month):
+            raise ValidationError('Некорректный месяц отчёта')
+        _iso_date(month + '-01', 'date')
+        with self.connect() as db:
+            self._lock_journal(db)
+            if archive:
+                password = body['password']
+                _string(password, 'password')
+                _string(body['snapshot'], 'snapshot')
+                if len(password) > ACCESS_PASSWORD_MAX_LENGTH or not self._journal_password_matches(db, password):
+                    raise JournalPermissionError('Неверный пароль журнала')
+            items = db.execute("""
+                SELECT item_id, payload FROM planner_items
+                WHERE collection = 'journal'
+                ORDER BY payload->>'date', item_id
+            """).fetchall()
+            rows = []
+            removable = []
+            for item_id, entry in items:
+                if not (entry.get('dutySignature') or '').strip():
+                    continue
+                departure = (entry.get('date') or '')[:7]
+                arrival = (entry.get('arrivalDate') or '')[:7]
+                returned = _journal_closed(entry) or entry.get('closed') is True
+                if departure != month and not (returned and arrival == month):
+                    continue
+                rows.append((item_id, entry))
+                if returned and (arrival or departure) <= month:
+                    removable.append(item_id)
+            snapshot = hashlib.sha256(json.dumps(rows, sort_keys=True).encode('utf-8')).hexdigest()
+            if archive:
+                if snapshot != body['snapshot']:
+                    raise ConflictError('Журнал изменился. Сформируйте PDF заново перед удалением.')
+                if removable:
+                    db.execute("DELETE FROM planner_items WHERE collection = 'journal' AND item_id = ANY(%s)",
+                               (removable,))
+                return {'deleted': len(removable)}
+            return {'snapshot': snapshot, 'items': [entry for _, entry in rows],
+                    'removable': len(removable)}
+
     def journal_create(self, fields: 'Any') -> 'dict[str, Any]':
         _exact_fields(fields, set(), _JOURNAL_DEPARTURE_FIELDS)
         with self.connect() as db:
             self._lock_journal(db)
-            next_id = db.execute("SELECT COALESCE(MAX(item_id), 0) + 1 FROM planner_items WHERE collection = 'journal'").fetchone()[0]
-            payload = {**_JOURNAL_DEFAULT_ENTRY, **fields, 'id': next_id, 'closedAt': None}
+            # Archived journal rows may still be referenced by exploitation records.
+            next_id = db.execute("""
+                SELECT GREATEST(
+                    (SELECT COALESCE(MAX(item_id), 0) FROM planner_items WHERE collection = 'journal'),
+                    (SELECT COALESCE(MAX((payload->>'journalEntryId')::bigint), 0)
+                     FROM planner_items WHERE collection = 'exploitation')
+                ) + 1
+            """).fetchone()[0]
+            payload = {**_JOURNAL_DEFAULT_ENTRY, **fields, 'id': next_id, 'closedAt': None, 'dutySignature': ''}
             parsed = JournalEntryDTO.parse(payload)
             if not parsed['regNumber'].strip():
                 raise ValidationError('Регистрационный знак обязателен')
@@ -1886,7 +2056,10 @@ class PlannerStore:
                     raise JournalPermissionError('Для изменения закрытой записи журнала нужен верный пароль')
             elif fields.keys() & _JOURNAL_ARRIVAL_ONLY_FIELDS:
                 raise ValidationError('Поля прибытия можно изменить только при закрытии записи')
-            parsed = JournalEntryDTO.parse({**payload, **fields})
+            updated = {**payload, **fields}
+            if not closed:
+                updated['dutySignature'] = ''
+            parsed = JournalEntryDTO.parse(updated)
             _validate_journal_arrival(parsed, payload)
             db.execute("UPDATE planner_items SET payload = %s WHERE collection = 'journal' AND item_id = %s", (Jsonb(parsed), item_id))
             if closed:
@@ -1926,6 +2099,7 @@ class PlannerStore:
 
     def update_vehicle_id(self, old_id: 'int', new_id: 'int') -> 'bool':
         with self.connect() as db:
+            self._lock_journal(db)
             row = db.execute('SELECT payload FROM planner_items WHERE collection = %s AND item_id = %s FOR UPDATE', ('vehicles', old_id)).fetchone()
             if row is None:
                 return False
@@ -1939,6 +2113,7 @@ class PlannerStore:
                 raise ConflictError('Такой идентификатор машины закреплен за сохраненной историей')
             vehicle = {**row[0], 'id': new_id}
             db.execute('UPDATE planner_items SET item_id = %s, payload = %s WHERE collection = %s AND item_id = %s', (new_id, Jsonb(vehicle), 'vehicles', old_id))
+            _record_registry_changes(db, {new_id: row[0]}, {new_id: vehicle})
             for collection in ('unavailable', 'exploitation'):
                 db.execute("UPDATE planner_items SET payload = jsonb_set(payload, '{vehicleId}', to_jsonb(%s::bigint), false) WHERE collection = %s AND payload->>'vehicleId' = %s", (new_id, collection, str(old_id)))
             db.execute("UPDATE planner_items SET item_id = %s, payload = jsonb_set(payload, '{vehicleId}', to_jsonb(%s::bigint), false) WHERE collection = %s AND item_id = %s", (new_id, new_id, 'vehicle_details', old_id))
@@ -1953,9 +2128,11 @@ class PlannerStore:
             if any((type(vehicle_id) is not int or vehicle_id < 1 or vehicle_id > MAX_DATABASE_ID for vehicle_id in vehicle_ids)) or len(set(vehicle_ids)) != len(vehicle_ids):
                 raise ValidationError('Идентификаторы машин должны быть уникальными положительными целыми числами')
         with self.connect() as db:
-            rows = db.execute('SELECT item_id FROM planner_items WHERE collection = %s AND item_id = ANY(%s) ORDER BY item_id FOR UPDATE', ('vehicles', vehicle_ids)).fetchall()
+            self._lock_journal(db)
+            rows = db.execute('SELECT item_id, payload FROM planner_items WHERE collection = %s AND item_id = ANY(%s) ORDER BY item_id FOR UPDATE', ('vehicles', vehicle_ids)).fetchall()
             if len(rows) != len(vehicle_ids):
                 return False
+            _record_registry_changes(db, dict(rows), {})
             db.execute('DELETE FROM planner_items WHERE collection = %s AND item_id = ANY(%s)', ('vehicles', vehicle_ids))
             db.execute("DELETE FROM planner_items WHERE collection = %s AND payload->>'vehicleId' = ANY(%s)", ('unavailable', [str(vehicle_id) for vehicle_id in vehicle_ids]))
             for vehicle_id in vehicle_ids:
@@ -2140,6 +2317,20 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                     headers = {'Set-Cookie': f'planner_access_passport=; HttpOnly; SameSite=Strict{cookie_secure}; Path=/api/access/passport; Max-Age=0'}
                 self.send_json(200, {'configured': configured, 'authenticated': authenticated}, headers)
                 return
+            if path == '/api/registry-changes':
+                try:
+                    if not self.check_authentication():
+                        self.send_json(401, {'error': 'Введите пароль перечня ВВСТ'})
+                        return
+                    cursor = parse_qs(urlparse(self.path).query).get('before', [None])[0]
+                    if cursor is not None and (not re.fullmatch(r'[0-9]{1,19}', cursor)
+                                               or not 1 <= int(cursor) <= MAX_DATABASE_ID):
+                        self.send_json(400, {'error': 'Некорректный номер записи'})
+                        return
+                    self.send_json(200, store.list_registry_changes(int(cursor) if cursor else None))
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
+                return
             if path == '/api/health':
                 try:
                     store.check_ready()
@@ -2274,6 +2465,23 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                     self.send_json(409, {'error': str(exc)})
                 except psycopg.Error:
                     self.send_json(503, {'error': 'database unavailable'})
+                return
+            if path in {'/api/journal/save-signature', '/api/journal/month-report', '/api/journal/archive-month'}:
+                try:
+                    body = self.read_body()
+                    if path == '/api/journal/save-signature':
+                        result = store.journal_save_signature(body)
+                    else:
+                        result = store.journal_month_report(body, archive=path == '/api/journal/archive-month')
+                    self.send_json(200, result, {'Cache-Control': 'no-store'})
+                except ValidationError as exc:
+                    self.send_json(400, {'error': str(exc)})
+                except JournalPermissionError as exc:
+                    self.send_json(403, {'error': str(exc)})
+                except ConflictError as exc:
+                    self.send_json(409, {'error': str(exc)})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
                 return
             if path == '/api/journal/verify-password':
                 try:

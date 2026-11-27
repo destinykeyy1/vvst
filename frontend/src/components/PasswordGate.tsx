@@ -13,6 +13,7 @@ import { Button, Input, Panel } from "./ui-kit";
 const SECTION_SCOPES: Record<string, AccessScope> = {
   statistics: "general",
   vvst: "general",
+  "registry-changes": "general",
   card: "general",
   oup: "general",
   household: "general",
@@ -28,7 +29,7 @@ const SECTION_SCOPES: Record<string, AccessScope> = {
 
 export function PasswordGate({ section, title, children }: { section: string; title: string; children: ReactNode }) {
   const scope = SECTION_SCOPES[section] ?? "passport";
-  const { ready, unlocked } = useSectionUnlocked(section);
+  const { ready } = useSectionUnlocked(section);
   const [status, setStatus] = useState<AccessStatus | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [value, setValue] = useState("");
@@ -74,6 +75,7 @@ export function PasswordGate({ section, title, children }: { section: string; ti
     try {
       const result = needsSetup ? await apiAccessSetup(scope, value) : await apiAccessLogin(scope, value);
       if (result.authenticated) {
+        setApiAuthenticated(true);
         unlockSection(section);
       } else {
         setError("Не удалось подтвердить доступ. Попробуйте ещё раз.");

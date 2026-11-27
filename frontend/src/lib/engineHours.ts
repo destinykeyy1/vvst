@@ -4,15 +4,18 @@ type PassportField = {
   ordinal?: unknown;
 };
 
+export function isCurrentHoursField(field: PassportField) {
+  const key = field.header.toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]/g, "");
+  return field.header === "meta:motoHours" || key === "103" || key === "n103" ||
+    (!/\d|сначала|норм|загод|замесяц|засутки|запериод|остаток/.test(key) && key.includes("моточас") &&
+      (key.includes("текущ") || String(field.ordinal) === "103" ||
+        key === "показаниясчетчикамоточасов"));
+}
+
 export function currentEngineHours(vehicle?: { passportData?: readonly PassportField[] | null }) {
   let current: number | null = null;
   for (const field of vehicle?.passportData ?? []) {
-    const key = field.header.toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]/g, "");
-    const isCurrent = key === "103" || key === "n103" ||
-      (!/\d|сначала|норм|загод|замесяц|засутки|запериод|остаток/.test(key) && key.includes("моточас") &&
-        (key.includes("текущ") || String(field.ordinal) === "103" ||
-          key === "показаниясчетчикамоточасов"));
-    if (!isCurrent || (typeof field.value !== "number" && typeof field.value !== "string")) continue;
+    if (!isCurrentHoursField(field) || (typeof field.value !== "number" && typeof field.value !== "string")) continue;
     const token = String(field.value).toLowerCase().replace(/\s+/g, "").replace(/,/g, ".")
       .replace(/(?:моточас(?:ов|а)?|моточ|мч|м\.ч\.?|ч\.?)$/, "");
     if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/.test(token)) continue;

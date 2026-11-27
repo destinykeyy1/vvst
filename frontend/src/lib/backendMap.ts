@@ -1,3 +1,4 @@
+import { currentEngineHours, isCurrentHoursField } from "./engineHours";
 import { ABSENT, type PassportDataItem, type Vehicle, type VehicleDto, type VehicleStatus, type VehicleType } from "./types";
 
 // Maps the frontend Vehicle model onto the backend VehicleDTO.
@@ -38,7 +39,7 @@ export function vehicleToDto(vehicle: Vehicle, yearlyNorm: number): VehicleDto {
   }
   // Preserve original passportExtra columns
   for (const item of foreign) {
-    passportData.push({ value: item.value, column: item.column, header: item.header });
+    passportData.push(isCurrentHoursField(item) ? { ...item, value: vehicle.motoHours } : item);
   }
 
   const raw = vehicle.rawDto;
@@ -91,7 +92,7 @@ export function vehicleFromDto(dto: VehicleDto): Vehicle {
     status: VEHICLE_STATUSES.includes(status as VehicleStatus) ? (status as VehicleStatus) : "ready",
     statusReason: String(meta.get("statusReason") ?? ""),
     mileage: dto.currentMileage,
-    motoHours: Number(meta.get("motoHours") ?? 0),
+    motoHours: currentEngineHours(dto) ?? 0,
     details,
     passportExtra,
     rawDto: dto,

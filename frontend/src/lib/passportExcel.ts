@@ -241,7 +241,8 @@ export async function importPassportExcel(file: File, baseId: number): Promise<V
 
     const passportExtra: PassportDataItem[] = [];
     for (let i = 0; i < PASSPORT_COLUMN_COUNT; i++) {
-      if (MAPPED_INDEXES.has(i)) continue;
+      if (MAPPED_INDEXES.has(i) && !PASSPORT_EXTRA_COLUMNS.has(i) &&
+          !PASSPORT_OVERRIDE_COLUMNS.has(i)) continue;
       const value = cellText(row, i);
       if (value === "") continue;
       passportExtra.push({ value, column: i + 1, header: PASSPORT_HEADERS[i] });
@@ -270,10 +271,42 @@ export async function importPassportExcel(file: File, baseId: number): Promise<V
   return vehicles;
 }
 
+export function applyPassportCellEdit(vehicle: Vehicle, index: number, value: string | number): Vehicle {
+  const column = index + 1;
+  const header = PASSPORT_HEADERS[index];
+  const fields = vehicle.passportExtra ?? [];
+  const existing = fields.find(field => field.column === column);
+  const passportExtra = fields.filter(field => field.column !== column).map(field => {
+    if (index !== COL.motoHours) return field;
+    const key = field.header.toLowerCase().replace(/ё/g, "е").replace(/[^а-яa-z0-9]/g, "");
+    const isCurrent = key === "103" || key === "n103" ||
+      (!/\d|сначала|норм|загод|замесяц|засутки|запериод|остаток/.test(key) && key.includes("моточас") &&
+        (key.includes("текущ") || ("ordinal" in field && Number(field.ordinal) === 103) ||
+          key === "показаниясчетчикамоточасов"));
+    return isCurrent ? { ...field, value } : field;
+  });
+  passportExtra.push({ ...existing, value, column, header });
+  return {
+    ...vehicle,
+    passportExtra,
+    ...(index === COL.techState ? { status: statusFromTechState(String(value)) } : {}),
+  };
+}
+
+// These cells may have a saved passport value, including an explicitly cleared value.
+const PASSPORT_OVERRIDE_COLUMNS = new Set<number>([
+  COL.techState, COL.mileageAtDec1, COL.yearlyNorm,
+]);
+
+const PASSPORT_EXTRA_COLUMNS = new Set<number>([
+  COL.location, COL.speedometerAtDec1, COL.yearMileage, COL.totalMileage,
+  COL.motoHoursAtDec1, COL.motoHoursDec1, COL.yearMotoHours, COL.totalMotoHours, COL.yearlyMotoNorm,
+]);
+
 function passportLookup(vehicle: Vehicle): Map<number, string> {
   const map = new Map<number, string>();
   for (const item of vehicle.passportExtra ?? []) {
-    if (item.value === null || item.value === "") continue;
+    if (item.value === null) continue;
     const s = String(item.value);
     if (!map.has(item.column)) map.set(item.column, s);
   }
@@ -305,7 +338,9 @@ export function vehicleToPassportRow(vehicle: Vehicle, yearlyNorm: number, index
   put(COL.motoHours, vehicle.motoHours);
 
   for (let i = 0; i < PASSPORT_COLUMN_COUNT; i++) {
-    if (MAPPED_INDEXES.has(i) || row[i] !== "") continue;
+    if (i === 0) continue;
+    if (MAPPED_INDEXES.has(i) && !PASSPORT_OVERRIDE_COLUMNS.has(i) &&
+        !PASSPORT_EXTRA_COLUMNS.has(i)) continue;
     const value = extra.get(i + 1);
     if (value !== undefined) row[i] = value;
   }

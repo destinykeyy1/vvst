@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 export const NAV = [
   { to: "/", label: "Статистика", locked: true },
   { to: "/vvst", label: "Перечень ВВСТ", locked: true },
+  { to: "/registry-changes", label: "История изменений ВВСТ", locked: true },
   { to: "/card", label: "Индивидуальная карточка ВВСТ", locked: true },
   { to: "/oup", label: "Расписание ОУП", locked: true },
   { to: "/household", label: "Хозяйственная деятельность", locked: true },

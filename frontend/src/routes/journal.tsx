@@ -1,3 +1,4 @@
+import { downloadJournalPdf } from "@/lib/journalPdf";
 import { currentEngineHours } from "@/lib/engineHours";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -117,15 +118,30 @@ const DEPARTURE_FIELDS: Column[] = [
 ];
 const ARRIVAL_FIELDS: Column[] = [...ARRIVAL_COLUMNS, REMARKS, DUTY_OFFICER];
 
-const COLUMN_BLOCKS: { label: string; columns: Column[] }[] = [
+const COLUMN_BLOCKS: { label?: string; columns: Column[] }[] = [
   { label: "Машина", columns: VEHICLE_COLUMNS },
-  { label: "Выезд", columns: [...DEPARTURE_COLUMNS, ...TRIP_COLUMNS] },
-  { label: "Прибытие", columns: ARRIVAL_COLUMNS },
+  { label: "Машина убыла из парка", columns: DEPARTURE_COLUMNS },
+  { columns: TRIP_COLUMNS },
+  { label: "Машина прибыла в парк", columns: ARRIVAL_COLUMNS },
   { label: "Примечания", columns: [REMARKS] },
 ];
 
-const groupedColumns = COLUMN_BLOCKS.flatMap(({ columns }) => columns);
-const tableColumns = [...MAIN_COLUMNS, ...groupedColumns, DUTY_OFFICER];
+const groupedColumns = COLUMN_BLOCKS.flatMap(({ label, columns }) => label ? columns : []);
+const tableColumns = [...MAIN_COLUMNS, ...COLUMN_BLOCKS.flatMap(({ columns }) => columns), DUTY_OFFICER];
+
+async function journalRequest<T>(path: string, body: object): Promise<T> {
+  const response = await fetch(`/api/journal/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Не удалось выполнить действие.");
+  return result;
+}
+
+type MonthReport = { month: string; snapshot: string; removable: number };
+
 const selectionWidth = 96;
 const tableWidth = tableColumns.reduce(
   (width, column) => width + column.width,
@@ -210,6 +226,16 @@ function localToday() {
   return `${now.getFullYear()}-${month}-${day}`;
 }
 
+function normalizeSubdivision(value?: string | null) {
+  return (value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+function newestFirst(a: JournalRow, b: JournalRow) {
+  return b.date.localeCompare(a.date) ||
+    (b.departureTime || "").localeCompare(a.departureTime || "") ||
+    Number(b.id) - Number(a.id);
+}
+
 function displayDate(value: string) {
   const date = /^(\d{4})-(\d{2})-(\d{2})(?:$|T)/.exec(value);
   return date ? `${date[3]}.${date[2]}.${date[1]}` : value;
@@ -273,6 +299,9 @@ function arrivalValidationError(entry: Entry) {
 function JournalPage() {
   const [dutyDate, setDutyDate] = useState(localToday);
   const [dutyOfficer, setDutyOfficer] = useState("");
+  const [reportOpen, setReportOpen] = useState(false);
+  const [report, setReport] = useState<MonthReport | null>(null);
+  const [archivePassword, setArchivePassword] = useState("");
   const [selectedId, setSelectedId] = useState<JournalRow["id"] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [deleteRow, setDeleteRow] = useState<JournalRow | null>(null);
@@ -306,23 +335,23 @@ function JournalPage() {
   const subdivisionById = new Map(
     (detailsQuery.data ?? []).map(({ vehicleId, certificate }) => [
       vehicleId,
-      certificate?.subdivision?.trim(),
+      normalizeSubdivision(certificate?.subdivision),
     ] as const),
   );
   const fleet = (vehiclesQuery.data ?? []).map((vehicle) => ({
     ...vehicle,
-    subdivision: subdivisionById.get(vehicle.id) || vehicle.location.trim(),
+    subdivision: normalizeSubdivision(vehicle.location) || subdivisionById.get(vehicle.id),
   }));
   const subdivisions = [...new Set(
-    [editor?.entry.subdivision, ...fleet.map((vehicle) => vehicle.subdivision)]
+    [normalizeSubdivision(editor?.entry.subdivision), ...fleet.map((vehicle) => vehicle.subdivision)]
       .filter((value): value is string => Boolean(value)),
   )].sort((a, b) => a.localeCompare(b, "ru"));
-  const subdivision = editor?.entry.subdivision;
+  const subdivision = normalizeSubdivision(editor?.entry.subdivision);
   const availableVehicles = subdivision
     ? fleet.filter((vehicle) => vehicle.subdivision === subdivision)
     : [];
   const registryLoading = vehiclesQuery.isPending || detailsQuery.isPending;
-  const registryFailed = vehiclesQuery.isError || detailsQuery.isError;
+  const registryFailed = vehiclesQuery.isError;
 
   const saveMutation = useMutation({
     mutationFn: saveJournalAction,
@@ -355,8 +384,75 @@ function JournalPage() {
   });
 
   const selected = journal.find((row) => row.id === selectedId);
-  const busy = isPending || isError || saveMutation.isPending;
-  const rows = [...journal].sort((a, b) => b.date.localeCompare(a.date));
+  const dutyMutation = useMutation({
+    mutationFn: () => journalRequest<{ updated: number }>("save-signature", { date: dutyDate, name: dutyOfficer }),
+    onSuccess: async ({ updated }) => {
+      await queryClient.invalidateQueries({ queryKey: ["journal"] });
+      toast.success(`Подпись обновлена в записях: ${updated}`);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const pdfMutation = useMutation({
+    mutationFn: async () => {
+      const month = localToday().slice(0, 7);
+      const result = await journalRequest<{ snapshot: string; items: JournalRow[]; removable: number }>(
+        "month-report", { month },
+      );
+      if (!result.items.length) throw new Error("За текущий месяц нет записей с подписью дежурного.");
+      const header = ({ label: text, width }: Column) => ({ text, width });
+      downloadJournalPdf(`Журнал выхода и возвращения машин ${month}`, [
+        [
+          ...MAIN_COLUMNS.map(header),
+          ...COLUMN_BLOCKS.flatMap(({ label, columns }) => label
+            ? [{ text: label, width: columns.reduce((sum, col) => sum + col.width, 0), span: columns.length }]
+            : columns.map(header)),
+          header(DUTY_OFFICER),
+        ],
+        groupedColumns.map(header),
+      ], result.items.sort(newestFirst).map(row => {
+        const returned = isClosed(row) && (!row.arrivalDate || row.arrivalDate.slice(0, 7) <= month);
+        return tableColumns.map(({ key, width }) => ({
+          width,
+          text: !returned && (ARRIVAL_COLUMNS.some(column => column.key === key) || key === REMARKS.key)
+            ? "" : displayCell(row, key),
+        }));
+      }));
+      return { month, snapshot: result.snapshot, removable: result.removable };
+    },
+    onSuccess: (result) => {
+      if (result.removable) setReport(result);
+      else {
+        setReportOpen(false);
+        toast.success("PDF подготовлен. Записей для удаления нет.");
+      }
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (snapshot: MonthReport) => journalRequest<{ deleted: number }>("archive-month", {
+      month: snapshot.month, snapshot: snapshot.snapshot, password: archivePassword,
+    }),
+    onSuccess: async ({ deleted }) => {
+      setReport(null);
+      setReportOpen(false);
+      setArchivePassword("");
+      setSelectedId(null);
+      await queryClient.invalidateQueries({ queryKey: ["journal"] });
+      toast.success(`Удалено завершённых записей: ${deleted}`);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const reportBusy = pdfMutation.isPending || archiveMutation.isPending;
+  function closeReport() {
+    setReportOpen(false);
+    setReport(null);
+    setArchivePassword("");
+  }
+
+  const busy = isPending || isError || saveMutation.isPending || dutyMutation.isPending || reportBusy;
+  const rows = [...journal].sort(newestFirst);
   const editorColumns = editor
     ? FORM_COLUMNS[editor.mode].filter(({ key }) => key !== "dutySignature")
     : [];
@@ -435,7 +531,7 @@ function JournalPage() {
         entry: {
           ...current.entry,
           date: dutyDate || localToday(),
-          dutySignature: dutyOfficer.trim(),
+          dutySignature: "",
         },
       },
     );
@@ -453,7 +549,7 @@ function JournalPage() {
         arrivalDate: selected.arrivalDate || dutyDate || localToday(),
         arrivalCondition: selected.arrivalCondition || "ТИ",
         arrivalSeal: selected.arrivalSeal || "ОПЛ",
-        dutySignature: dutyOfficer.trim() || selected.dutySignature || "",
+        dutySignature: dutyOfficer.trim(),
       },
     });
     setDeleteRow(null);
@@ -578,6 +674,9 @@ function JournalPage() {
         </h1>
 
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setReportOpen(true)} disabled={busy}>
+            Выгрузить PDF
+          </Button>
           <Button className="h-[38px] rounded-md" onClick={handleAdd} disabled={busy}>
             Добавить выезд
           </Button>
@@ -625,7 +724,7 @@ function JournalPage() {
             ))}
           </colgroup>
           {COLUMN_BLOCKS.map(({ label, columns }) => (
-            <colgroup key={label}>
+            <colgroup key={label ?? columns[0].key}>
               {columns.map(({ key, width }) => (
                 <col key={key} style={{ width }} />
               ))}
@@ -645,11 +744,15 @@ function JournalPage() {
                   {label}
                 </th>
               ))}
-              {COLUMN_BLOCKS.map(({ label, columns }) => (
+              {COLUMN_BLOCKS.map(({ label, columns }) => label ? (
                 <th key={label} colSpan={columns.length} scope="colgroup" className={headerCell}>
                   {label}
                 </th>
-              ))}
+              ) : columns.map(column => (
+                <th key={column.key} rowSpan={2} scope="col" className={headerCell}>
+                  {column.label}
+                </th>
+              )))}
               <th rowSpan={2} scope="col" className={headerCell}>
                 {DUTY_OFFICER.label}
               </th>
@@ -678,6 +781,13 @@ function JournalPage() {
                       onChange={(event) => setDutyDate(event.target.value)}
                     />
                   </label>
+                  <Button
+                    className="h-[38px]"
+                    disabled={busy || !dutyDate || !dutyOfficer.trim()}
+                    onClick={() => dutyMutation.mutate()}
+                  >
+                    Сохранить дежурного
+                  </Button>
                   <label className="block min-w-[min(220px,100%)] flex-1">
                     <span className="mb-0.5 block text-[12px] uppercase text-neutral-500">
                       Дежурный по парку (фамилия и инициалы)
@@ -731,6 +841,38 @@ function JournalPage() {
           </tbody>
         </table>
       </div>
+
+      <Modal
+        open={reportOpen}
+        title="Выгрузка журнала за текущий месяц"
+        onClose={() => { if (!reportBusy) closeReport(); }}
+        footer={
+          <>
+            <Button variant="outline" disabled={reportBusy} onClick={closeReport}>Отмена</Button>
+            {report ? (
+              <Button
+                disabled={reportBusy || !archivePassword}
+                onClick={() => archiveMutation.mutate(report)}
+              >
+                PDF сохранён, удалить записи
+              </Button>
+            ) : (
+              <Button disabled={reportBusy} onClick={() => pdfMutation.mutate()}>Скачать PDF</Button>
+            )}
+          </>
+        }
+      >
+        <p className="mb-4 text-sm">
+          После сохранения PDF и подтверждения завершённые записи за текущий месяц будут удалены.
+          Записи без подписи дежурного пропускаются и остаются в журнале.
+        </p>
+        {report && (
+          <Field label={`Пароль журнала для удаления записей (${report.removable})`}>
+            <Input type="password" autoComplete="current-password" value={archivePassword}
+              onChange={event => setArchivePassword(event.target.value)} />
+          </Field>
+        )}
+      </Modal>
 
       <Modal
         open={passwordRequest !== null}
@@ -811,7 +953,7 @@ function JournalPage() {
                         <select
                           id={fieldId}
                           className={formSelect}
-                          value={value}
+                          value={normalizeSubdivision(String(value ?? ""))}
                           disabled={saving || registryLoading || registryFailed}
                           onChange={(event) => changeSubdivision(event.target.value)}
                         >
