@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from datetime import date
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from .config import (
     ACCESS_PASSWORD_MAX_LENGTH,
@@ -49,6 +51,69 @@ from .models import (
     _exact_fields,
     _string,
 )
+
+def _mutate_unavailable(store, body):
+    _exact_fields(body, {'action'}, {'entry', 'id', 'ids'})
+    action = body['action']
+    _choice(action, {'create', 'update', 'delete'}, 'action')
+    fields = {'vehicleId', 'startDate', 'endDate', 'reason'}
+    optional = {'customReason', 'notes'}
+    if action == 'delete':
+        _exact_fields(body, {'action', 'ids'})
+        ids = body['ids']
+        if not isinstance(ids, list) or not ids or any(
+            type(item) is not int or not 1 <= item <= MAX_DATABASE_ID for item in ids
+        ):
+            raise ValidationError('Выберите записи для удаления')
+        ids = sorted(set(ids))
+    else:
+        _exact_fields(body, {'action', 'entry'} | ({'id'} if action == 'update' else set()))
+        _exact_fields(body['entry'], fields, optional)
+        item_id = body.get('id', 1)
+        if type(item_id) is not int or not 1 <= item_id <= MAX_DATABASE_ID:
+            raise ValidationError('Некорректный идентификатор записи')
+        entry = UnavailableDTO.parse({**body['entry'], 'id': item_id})
+        for key in ('startDate', 'endDate'):
+            if date.fromisoformat(entry[key]).isoformat() != entry[key]:
+                raise ValidationError('Укажите дату в формате ГГГГ-ММ-ДД')
+        if entry['reason'] == 'Другое' and not (entry.get('customReason') or '').strip():
+            raise ValidationError('Укажите причину недоступности')
+
+    with store.connect() as db:
+        db.execute('SELECT pg_advisory_xact_lock(%s, %s)', (1297108050, 3))
+        if action != 'delete':
+            vehicle = db.execute("""
+                SELECT 1 FROM planner_items WHERE collection = 'vehicles' AND item_id = %s FOR KEY SHARE
+            """, (entry['vehicleId'],)).fetchone()
+            if vehicle is None:
+                raise ConflictError('Машина не найдена в перечне')
+        if action != 'create':
+            target_ids = ids if action == 'delete' else [item_id]
+            rows = db.execute("""
+                SELECT item_id, payload FROM planner_items
+                WHERE collection = 'unavailable' AND item_id = ANY(%s)
+                ORDER BY item_id FOR UPDATE
+            """, (target_ids,)).fetchall()
+            if len(rows) != len(target_ids):
+                raise ConflictError('Записи изменились. Обновите список.')
+            if any(payload.get('orderId') is not None for _, payload in rows):
+                raise ConflictError('Записи из нарядов доступны для просмотра')
+        if action == 'delete':
+            db.execute("DELETE FROM planner_items WHERE collection = 'unavailable' AND item_id = ANY(%s)", (ids,))
+            return {'deleted': ids}
+        if action == 'create':
+            entry['id'] = db.execute("""
+                SELECT COALESCE(MAX(item_id), 0) + 1 FROM planner_items WHERE collection = 'unavailable'
+            """).fetchone()[0]
+            db.execute("""
+                INSERT INTO planner_items(collection, item_id, payload) VALUES ('unavailable', %s, %s)
+            """, (entry['id'], Jsonb(entry)))
+        else:
+            db.execute("""
+                UPDATE planner_items SET payload = %s WHERE collection = 'unavailable' AND item_id = %s
+            """, (Jsonb(entry), item_id))
+        return entry
+
 
 def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -> 'type[BaseHTTPRequestHandler]':
     frontend_root = Path(static_root).resolve() if static_root is not None else None
@@ -237,6 +302,30 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
                 except psycopg.Error:
                     self.send_json(503, {'error': 'База данных недоступна'})
                 return
+            if path == '/api/statistics/totals':
+                if not self.check_authentication():
+                    self.send_json(401, {'error': 'Требуется вход в приложение'})
+                    return
+                try:
+                    with store.connect() as db:
+                        orders, departures = db.execute("""
+                            WITH departure_ids AS (
+                                SELECT item_id::text AS journal_id
+                                FROM planner_items WHERE collection = 'journal'
+                                UNION
+                                SELECT payload->>'journalEntryId'
+                                FROM planner_items
+                                WHERE collection = 'exploitation'
+                                  AND payload->>'journalEntryId' IS NOT NULL
+                            )
+                            SELECT (SELECT count(*) FROM planner_items WHERE collection = 'orders'),
+                                   (SELECT count(*) FROM departure_ids)
+                        """).fetchone()
+                    self.send_json(200, {'orders': orders, 'departures': departures},
+                                   {'Cache-Control': 'no-store'})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
+                return
             if path == '/api/health':
                 try:
                     store.check_ready()
@@ -341,6 +430,22 @@ def make_handler(store: 'PlannerStore', static_root: 'str | Path | None'=None) -
 
         def do_POST(self) -> 'None':
             path = urlparse(self.path).path
+            if path == '/api/unavailable/actions':
+                if not self.check_authentication():
+                    self.send_json(401, {'error': 'Требуется вход в приложение'})
+                    return
+                try:
+                    result = _mutate_unavailable(store, self.read_body())
+                except ValidationError as exc:
+                    self.send_json(400, {'error': str(exc)})
+                except (ConflictError, psycopg.errors.UniqueViolation) as exc:
+                    message = str(exc) if isinstance(exc, ConflictError) else 'Записи изменились. Повторите действие.'
+                    self.send_json(409, {'error': message})
+                except psycopg.Error:
+                    self.send_json(503, {'error': 'База данных недоступна'})
+                else:
+                    self.send_json(200, result)
+                return
             if path.startswith('/api/documents/'):
                 self.handle_document(path)
                 return

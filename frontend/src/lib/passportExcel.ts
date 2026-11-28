@@ -1,3 +1,4 @@
+import * as XLSX from "xlsx";
 import type { PassportDataItem, Vehicle, VehicleType } from "./types";
 
 // Electronic passport (formulyar) template — 120 columns, header on sheet row 7,
@@ -197,7 +198,6 @@ function guessType(brand: string): VehicleType {
 }
 
 async function readSheetRows(file: File): Promise<unknown[][]> {
-  const XLSX = await import("xlsx");
   const buf = await file.arrayBuffer();
   const book = XLSX.read(buf);
   const first = book.SheetNames[0];
@@ -370,7 +370,6 @@ export function buildPassportSheetRows(vehicles: Vehicle[], yearlyNorm: number):
 }
 
 export async function exportPassportExcel(filename: string, vehicles: Vehicle[], yearlyNorm: number) {
-  const XLSX = await import("xlsx");
   const sheet = XLSX.utils.aoa_to_sheet(buildPassportSheetRows(vehicles, yearlyNorm));
   sheet["!cols"] = PASSPORT_HEADERS.map(() => ({ wch: 18 }));
   const book = XLSX.utils.book_new();

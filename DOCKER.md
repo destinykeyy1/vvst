@@ -6,6 +6,18 @@
 
 ## Быстрый запуск
 
+С GNU Make можно собрать и запустить Docker-версию командами из корня проекта:
+
+```powershell
+make build
+make run
+make stop
+```
+
+Для portable-сборки используйте `make compile`, затем `make portable`.
+Остановить её можно через `make stop PORTABLE=1`. Команда
+`make run PORTABLE=1` также запускает portable-приложение.
+
 1. **Установите Docker Desktop** с https://www.docker.com/products/docker-desktop
 
 2. **Запустите Docker Desktop** и дождитесь его готовности

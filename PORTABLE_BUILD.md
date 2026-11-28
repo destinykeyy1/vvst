@@ -7,9 +7,30 @@ shortcut.
 ## Requirements
 
 - 64-bit Windows and Python
+- GNU Make, if using the Make commands below
+- Bun installed in `%USERPROFILE%\.bun` or available on `PATH`
 - A PostgreSQL installation or portable PostgreSQL folder containing `bin`,
   `lib`, and `share`
-- Bun (the frontend dependencies are pinned by `frontend/bun.lock`)
+- The Python dependencies in `requirements-build.txt` (installed by the build
+  script)
+
+## Make commands
+
+From the project root:
+
+```powershell
+make compile
+make portable
+make stop PORTABLE=1
+```
+
+`make compile` builds the frontend and portable executable into
+`portable\MilitaryPlanner`. `make portable` starts it without a persistent
+command window. `make stop PORTABLE=1` stops its backend and PostgreSQL.
+Alternatively, `make run PORTABLE=1` starts the portable application.
+
+To build and run the Docker version, use `make build`, `make run`, and
+`make stop`.
 
 By default, the script builds the frontend from `frontend/` and packages a
 fresh static build of the current route components:

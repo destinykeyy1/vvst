@@ -17,6 +17,10 @@ import type { Vehicle, VehicleType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const columnWidths = [76, 160, 160, 96, 208, 240, 240, 240];
+const selectionWidth = 48;
+const pinnedColumns = 5;
+const columnWidth = (index: number) => columnWidths[index] ?? 160;
+
 
 export const Route = createFileRoute("/vvst")({
   head: () => ({
@@ -216,6 +220,12 @@ function VvstPage() {
     ? [...new Set([0, 1, 2, 3, 4, ...filter.columns])]
     : ALL_COLUMNS.filter((column) => visible.has(column));
 
+  const pinnedOffsets = new Map<number, number>();
+  const tableWidth = visibleColumns.reduce((left, column) => {
+    if (column < pinnedColumns) pinnedOffsets.set(column, left);
+    return left + columnWidth(column);
+  }, selectionWidth);
+
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = withEdits.map((v, i) => {
@@ -405,10 +415,14 @@ function VvstPage() {
       </Panel>
 
       <Panel className="thin-scroll max-h-[calc(100vh-20rem)] overflow-auto">
-        <table className="w-max min-w-full border-collapse text-sm">
+        <table className="table-fixed border-collapse text-sm" style={{ width: tableWidth }}>
+          <colgroup>
+            <col style={{ width: selectionWidth }} />
+            {visibleColumns.map(column => <col key={column} style={{ width: columnWidth(column) }} />)}
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-muted">
             <tr className="border-b border-border">
-              <th className="w-12 px-3 py-2 text-center align-middle">
+              <th className="sticky left-0 z-10 bg-muted px-3 py-2 text-center align-middle">
                 <input
                   className="mx-auto block size-4"
                   type="checkbox"
@@ -418,7 +432,7 @@ function VvstPage() {
                 />
               </th>
               {visibleColumns.map((i) => (
-                <th key={i} aria-sort={sort?.col === i ? (sort.ascending ? "ascending" : "descending") : "none"} scope="col" style={{ width: columnWidths[i] ?? 160 }} className={cn("px-2 py-3 align-middle text-xs font-normal tracking-wide text-neutral-500", i < 5 ? "text-left" : "text-center")}>
+                <th key={i} aria-sort={sort?.col === i ? (sort.ascending ? "ascending" : "descending") : "none"} scope="col" style={{ left: pinnedOffsets.get(i) }} className={cn("px-2 py-3 align-middle text-xs font-normal tracking-wide text-neutral-500", i < 5 ? "sticky z-10 bg-muted text-left" : "text-center")}>
                   <span className="block text-[10px] text-muted-foreground">№ {i + 1}</span>
                   <button type="button" className="inline-flex items-center gap-1"
                     onClick={() => setSort(previous => ({ col: i, ascending: previous?.col === i ? !previous.ascending : true }))}>
@@ -430,8 +444,8 @@ function VvstPage() {
           </thead>
           <tbody>
             {rows.map(({ v, cells, flagged }) => (
-              <tr key={v.id} className={cn("border-b border-neutral-100", selected.has(v.id) ? "bg-accent" : "even:bg-neutral-50")}>
-                <td className="px-3 py-2 text-center align-middle">
+              <tr key={v.id} className={cn("border-b border-neutral-100", selected.has(v.id) ? "bg-accent" : "bg-card even:bg-neutral-50")}>
+                <td className="sticky left-0 z-[1] bg-inherit px-3 py-2 text-center align-middle">
                   <input
                     className="mx-auto block size-4"
                     type="checkbox"
@@ -453,12 +467,15 @@ function VvstPage() {
                   const isEditing = editKey !== undefined && editing?.id === v.id && editing.key === editKey;
                   const display = raw === "" || raw === null || raw === undefined ? "" : NUMERIC_COLS.has(col) ? formatNumber(Number(raw)) : String(raw);
                   const numeric = editKey ? COLUMNS.find((c) => c.key === editKey)?.numeric : false;
+                  const highlighted = flagged.includes(col) || (flagged.includes(col - 1) && raw != null && raw !== "");
                   const edited = editKey !== undefined && editedCells.has(`${v.id}:${editKey}`);
                   return (
                     <td
                       key={col}
-                      style={{ width: columnWidths[col] ?? 160, maxWidth: columnWidths[col] ?? 160 }}
-                      className={cn("px-2 py-2 align-middle text-sm", col >= 5 && "text-center", edited && "bg-warning-soft", (flagged.includes(col) || (flagged.includes(col - 1) && raw != null && raw !== "")) && "border border-red-300 bg-red-100 text-red-900")}
+                      style={{ left: pinnedOffsets.get(col) }}
+                      className={cn("px-2 py-2 align-middle text-sm", col < pinnedColumns ? "sticky z-[1]" : "text-center",
+                        highlighted ? "border border-red-300 bg-red-100 text-red-900" :
+                          edited ? "bg-warning-soft" : col < pinnedColumns && "bg-inherit")}
                     >
                       {isEditing ? (
                         <div className="space-y-1">

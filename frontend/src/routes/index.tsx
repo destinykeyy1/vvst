@@ -1,9 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlertTriangle, Check } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, PageHeader, Panel, StatCard } from "@/components/ui-kit";
 import { PasswordGate } from "@/components/PasswordGate";
-import { computeStats, formatNumber } from "@/lib/logic";
+import { apiGetCollection } from "@/lib/api";
+import { computeStats, formatNumber, isoDate } from "@/lib/logic";
 import { useAppState } from "@/lib/store";
 
 export const Route = createFileRoute("/")({
@@ -20,8 +22,17 @@ export const Route = createFileRoute("/")({
   component: StatisticsPage,
 });
 
-function timeNow() {
-  return new Date().toLocaleTimeString("ru-RU");
+type UnavailableRecord = {
+  vehicleId: number;
+  startDate: string;
+  endDate: string;
+  reason: string;
+};
+
+async function loadTotals(signal: AbortSignal): Promise<{ orders: number; departures: number }> {
+  const response = await fetch("/api/statistics/totals", { signal, cache: "no-store" });
+  if (!response.ok) throw new Error("Не удалось загрузить число нарядов и выездов.");
+  return response.json();
 }
 
 function StatisticsPage() {
@@ -34,35 +45,62 @@ function StatisticsPage() {
 
 function StatisticsContent() {
   const state = useAppState((s) => s);
-  const [updated, setUpdated] = useState("");
   const [now, setNow] = useState(() => new Date());
-  useEffect(() => setUpdated(timeNow()), []);
-  const stats = computeStats(state, now);
+  const repairs = useQuery({
+    queryKey: ["unavailable"],
+    queryFn: () => apiGetCollection<UnavailableRecord>("unavailable"),
+  });
+  const totals = useQuery({
+    queryKey: ["statistics", "totals"],
+    queryFn: ({ signal }) => loadTotals(signal),
+    refetchOnMount: "always",
+  });
+  const current = repairs.dataUpdatedAt > now.getTime() ? new Date(repairs.dataUpdatedAt) : now;
+  const today = isoDate(current.getFullYear(), current.getMonth(), current.getDate());
+  const stats = useMemo(() => {
+    const activeRepairs = new Set(
+      (repairs.data ?? []).filter(entry =>
+        entry.reason === "Ремонт" && entry.startDate <= today && today <= entry.endDate,
+      ).map(entry => entry.vehicleId),
+    );
+    const vehicles = state.vehicles.map(vehicle =>
+      activeRepairs.has(vehicle.id) ? { ...vehicle, status: "repair" as const } : vehicle,
+    );
+    return computeStats({ ...state, vehicles }, now);
+  }, [state, repairs.data, today, now]);
   const attention = stats.needsAttention.length;
 
   return (
     <div>
       <PageHeader
         title="Статистика"
-        subtitle={`Обновлено: ${updated}`}
+        subtitle={`Обновлено: ${current.toLocaleTimeString("ru-RU")}`}
         actions={
           <Button
             variant="outline"
+            disabled={repairs.isFetching || totals.isFetching}
             onClick={() => {
               setNow(new Date());
-              setUpdated(timeNow());
+              void repairs.refetch();
+              void totals.refetch();
             }}
           >
             Обновить
           </Button>
         }
       />
+      {totals.isError && (
+        <p role="alert" className="mb-4 text-sm text-destructive">Не удалось обновить число нарядов и выездов.</p>
+      )}
+      {repairs.isError && (
+        <p role="alert" className="mb-4 text-sm text-destructive">Не удалось обновить данные о ремонте.</p>
+      )}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <StatCard label="Всего машин" value={stats.total} />
         <StatCard label="Готово к выезду" value={stats.ready} />
         <StatCard label="В ремонте" value={stats.repair} />
-        <StatCard label="Всего нарядов" value={stats.orders} />
-        <StatCard label="За этот месяц" value={stats.ordersThisMonth} />
+        <StatCard label="Всего нарядов" value={totals.data?.orders ?? "—"} />
+        <StatCard label="Всего выездов" value={totals.data?.departures ?? "—"} />
         <StatCard label="Средний пробег" value={`${formatNumber(stats.avgMileage)} км`} />
       </div>
 
