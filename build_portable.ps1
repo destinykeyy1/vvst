@@ -267,4 +267,20 @@ finally {
     if (Test-Path $WorkRoot) {
         Remove-Item -LiteralPath $WorkRoot -Recurse -Force
     }
+
+    $BundleLeaf = Split-Path -Leaf $OutputPath
+    Get-ChildItem -LiteralPath $PortableOutputRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$BundleLeaf.staging-*" -or $_.Name -like "$BundleLeaf.previous-*" } |
+        ForEach-Object {
+            if ($StageVerified -and $_.FullName -eq $StagedBundle) {
+                Write-Warning "Keeping verified bundle at $StagedBundle because it could not be published."
+                return
+            }
+            try {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "Could not remove leftover bundle folder $($_.FullName): $($_.Exception.Message)"
+            }
+        }
 }

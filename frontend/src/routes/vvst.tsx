@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 
 const columnWidths = [76, 160, 160, 96, 208, 240, 240, 240];
 const selectionWidth = 48;
-const pinnedColumns = 5;
+const pinnedColumns = 7;
 const columnWidth = (index: number) => columnWidths[index] ?? 160;
 
 
@@ -432,7 +432,7 @@ function VvstPage() {
                 />
               </th>
               {visibleColumns.map((i) => (
-                <th key={i} aria-sort={sort?.col === i ? (sort.ascending ? "ascending" : "descending") : "none"} scope="col" style={{ left: pinnedOffsets.get(i) }} className={cn("px-2 py-3 align-middle text-xs font-normal tracking-wide text-neutral-500", i < 5 ? "sticky z-10 bg-muted text-left" : "text-center")}>
+                <th key={i} aria-sort={sort?.col === i ? (sort.ascending ? "ascending" : "descending") : "none"} scope="col" style={{ left: pinnedOffsets.get(i) }} className={cn("px-2 py-3 align-middle text-xs font-normal tracking-wide text-neutral-500", i < pinnedColumns ? "sticky z-10 bg-muted text-left" : "text-center")}>
                   <span className="block text-[10px] text-muted-foreground">№ {i + 1}</span>
                   <button type="button" className="inline-flex items-center gap-1"
                     onClick={() => setSort(previous => ({ col: i, ascending: previous?.col === i ? !previous.ascending : true }))}>
