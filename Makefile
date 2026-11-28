@@ -3,13 +3,14 @@
 PORTABLE_OUTPUT ?= portable\MilitaryPlanner
 PORTABLE_EXE = $(PORTABLE_OUTPUT)\MilitaryPlanner.exe
 
-.PHONY: help build run compile portable stop docker-run docker-stop portable-stop
+.PHONY: help build run compile compilezip portable stop docker-run docker-stop portable-stop
 
 help:
 	@echo "make build                 Build Docker images"
 	@echo "make run                   Start the Docker application"
 	@echo "make run PORTABLE=1        Start the portable application"
 	@echo "make compile               Build the portable application"
+	@echo "make compilezip            Build the portable application and create a zip archive"
 	@echo "make portable              Start the portable application"
 	@echo "make stop                  Stop Docker services"
 	@echo "make stop PORTABLE=1       Stop the portable application"
@@ -24,6 +25,9 @@ stop:
 	docker compose down
 
 compile:
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 -OutputPath "$(PORTABLE_OUTPUT)" -SkipArchive
+
+compilezip:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_portable.ps1 -OutputPath "$(PORTABLE_OUTPUT)"
 
 portable:

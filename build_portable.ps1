@@ -1,7 +1,8 @@
 param(
     [string]$PostgresRoot = (Join-Path $PSScriptRoot '..\MilitaryPlanner\postgres'),
     [string]$OutputPath = (Join-Path $PSScriptRoot 'portable\MilitaryPlanner'),
-    [switch]$UseExistingFrontend
+    [switch]$UseExistingFrontend,
+    [switch]$SkipArchive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,7 @@ $ProjectRoot = (Resolve-Path $PSScriptRoot).Path
 $PostgresRoot = [System.IO.Path]::GetFullPath($PostgresRoot)
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $PortableOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot 'portable')).TrimEnd('\') + '\'
+$BundleLeaf = Split-Path -Leaf $OutputPath.TrimEnd('\')
 if (-not $OutputPath.StartsWith($PortableOutputRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OutputPath must be inside $PortableOutputRoot"
 }
@@ -250,6 +252,17 @@ try {
         }
     }
 
+    if (-not $SkipArchive) {
+        $ArchivePath = Join-Path $PortableOutputRoot ("$BundleLeaf-" + (Get-Date -Format 'yyyyMMdd-HHmm') + '.zip')
+        try {
+            Compress-Archive -LiteralPath $OutputPath -DestinationPath $ArchivePath -Force
+            Write-Host "Archive created: $ArchivePath"
+        }
+        catch {
+            Write-Warning "Could not create archive $ArchivePath`: $($_.Exception.Message)"
+        }
+    }
+
     $Executable = Join-Path $OutputPath 'MilitaryPlanner.exe'
     Write-Host "Portable bundle created: $OutputPath"
     Write-Host "Start: $Executable"
@@ -268,7 +281,6 @@ finally {
         Remove-Item -LiteralPath $WorkRoot -Recurse -Force
     }
 
-    $BundleLeaf = Split-Path -Leaf $OutputPath
     Get-ChildItem -LiteralPath $PortableOutputRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "$BundleLeaf.staging-*" -or $_.Name -like "$BundleLeaf.previous-*" } |
         ForEach-Object {
